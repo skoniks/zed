@@ -244,10 +244,7 @@ impl Render for TitleBar {
                 .upgrade()
                 .and_then(|ws| ws.read(cx).multi_workspace().cloned())
             {
-                self.multi_workspace = Some(mw.clone());
-                self.platform_titlebar.update(cx, |titlebar, _cx| {
-                    titlebar.set_multi_workspace(mw);
-                });
+                self.multi_workspace = Some(mw);
             }
         }
 
@@ -536,13 +533,8 @@ impl TitleBar {
         }
 
         let update_version = cx.new(|cx| UpdateVersion::new(cx));
-        let platform_titlebar = cx.new(|cx| {
-            let mut titlebar = PlatformTitleBar::new(id, cx).without_system_window_tabs();
-            if let Some(mw) = multi_workspace.clone() {
-                titlebar = titlebar.with_multi_workspace(mw);
-            }
-            titlebar
-        });
+        let platform_titlebar =
+            cx.new(|cx| PlatformTitleBar::new(id, cx).without_system_window_tabs());
 
         let banner = None;
 
@@ -837,7 +829,7 @@ impl TitleBar {
             .multi_workspace
             .as_ref()
             .and_then(|mw| mw.upgrade())
-            .map(|mw| mw.read(cx).sidebar_open())
+            .map(|mw| mw.read(cx).sidebar_visible(cx))
             .unwrap_or(false)
             && PlatformTitleBar::is_multi_workspace_enabled(cx);
 

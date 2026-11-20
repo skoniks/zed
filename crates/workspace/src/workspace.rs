@@ -31,11 +31,11 @@ mod workspace_settings;
 
 pub use dock::Panel;
 pub use multi_workspace::{
-    CloseWorkspaceSidebar, DraggedSidebar, FocusWorkspaceSidebar, MoveProjectDown,
-    MoveProjectToNewWindow, MoveProjectUp, MultiWorkspace, MultiWorkspaceEvent, NewThread,
-    NextProject, NextThread, PreviousProject, PreviousThread, ProjectGroup, ProjectGroupKey,
-    RemovalIntent, SerializedProjectGroupState, Sidebar, SidebarEvent, SidebarHandle,
-    SidebarRenderState, SidebarSide, ToggleWorkspaceSidebar, sidebar_side_context_menu,
+    CloseWorkspaceSidebar, FocusWorkspaceSidebar, MoveProjectDown, MoveProjectToNewWindow,
+    MoveProjectUp, MultiWorkspace, MultiWorkspaceEvent, NewThread, NextProject, NextThread,
+    PreviousProject, PreviousThread, ProjectGroup, ProjectGroupKey, RemovalIntent,
+    SerializedProjectGroupState, Sidebar, SidebarEvent, SidebarHandle, SidebarSide,
+    ToggleWorkspaceSidebar,
 };
 pub use path_list::{PathList, SerializedPathList};
 pub use remote::RemoteConnectionIdentity;
@@ -1718,6 +1718,7 @@ pub struct Workspace {
     _dev_container_task: Option<Task<Result<()>>>,
     _panels_task: Option<Task<Result<()>>>,
     sidebar_focus_handle: Option<FocusHandle>,
+    threads_sidebar_open: Option<Rc<Cell<bool>>>,
     multi_workspace: Option<WeakEntity<MultiWorkspace>>,
     /// Shared with the parent `MultiWorkspace` and any sibling workspaces: holds
     /// the id of the single workspace currently presented in this OS window.
@@ -2049,7 +2050,7 @@ impl Workspace {
             .flatten()
             .map(|mw| mw.downgrade());
         let status_bar = cx.new(|cx| {
-            let mut status_bar = StatusBar::new(&center_pane, multi_workspace.clone(), window, cx);
+            let mut status_bar = StatusBar::new(&center_pane, window, cx);
             status_bar.add_left_item(left_dock_buttons, window, cx);
             status_bar.add_right_item(right_dock_buttons, window, cx);
             status_bar.add_right_item(bottom_dock_buttons, window, cx);
@@ -2216,6 +2217,7 @@ impl Workspace {
             last_open_dock_positions: Vec::new(),
             removing: false,
             sidebar_focus_handle: None,
+            threads_sidebar_open: None,
             multi_workspace,
             active_workspace_id: None,
             active_worktree_creation: ActiveWorktreeCreation::default(),
@@ -2949,6 +2951,59 @@ impl Workspace {
         self.sidebar_focus_handle = handle;
     }
 
+    pub(crate) fn agent_panel_id(&self, cx: &App) -> Option<EntityId> {
+        self.all_docks().into_iter().find_map(|dock| {
+            let dock = dock.read(cx);
+            let index = dock.panel_index_for_proto_id(PanelId::AssistantPanel)?;
+            dock.panel_at_index(index).map(|panel| panel.panel_id())
+        })
+    }
+
+    pub(crate) fn show_threads_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for dock in self.all_docks().map(|dock| dock.clone()) {
+            if let Some(index) = dock
+                .read(cx)
+                .panel_index_for_proto_id(PanelId::AssistantPanel)
+            {
+                let position = dock.read(cx).position();
+                self.dismiss_zoomed_items_to_reveal(Some(position), window, cx);
+                dock.update(cx, |dock, cx| {
+                    dock.activate_panel(index, window, cx);
+                    dock.set_open(true, window, cx);
+                    if let Some(panel) = dock.active_panel() {
+                        App::notify(cx, panel.panel_id());
+                    }
+                });
+                self.serialize_workspace(window, cx);
+                break;
+            }
+        }
+    }
+
+    fn dismiss_threads_sidebar(&self, panel: &dyn PanelHandle, cx: &mut App) -> bool {
+        if panel.remote_id() != Some(PanelId::AssistantPanel)
+            || !self.owns_window_chrome()
+            || !self
+                .threads_sidebar_open
+                .as_ref()
+                .is_some_and(|open| open.replace(false))
+        {
+            return false;
+        }
+
+        cx.notify(panel.panel_id());
+        if let Some(multi_workspace) = self.multi_workspace.clone() {
+            cx.defer(move |cx| {
+                if let Some(multi_workspace) = multi_workspace.upgrade() {
+                    multi_workspace.update(cx, |multi_workspace, cx| {
+                        multi_workspace.sidebar_dismissed(cx);
+                    });
+                }
+            });
+        }
+        true
+    }
+
     pub fn status_bar_visible(&self, cx: &App) -> bool {
         StatusBarSettings::get_global(cx).show
     }
@@ -2961,13 +3016,11 @@ impl Workspace {
         &mut self,
         multi_workspace: WeakEntity<MultiWorkspace>,
         active_workspace_id: Rc<Cell<EntityId>>,
-        cx: &mut App,
+        threads_sidebar_open: Rc<Cell<bool>>,
     ) {
-        self.status_bar.update(cx, |status_bar, cx| {
-            status_bar.set_multi_workspace(multi_workspace.clone(), cx);
-        });
         self.multi_workspace = Some(multi_workspace);
         self.active_workspace_id = Some(active_workspace_id);
+        self.threads_sidebar_open = Some(threads_sidebar_open);
     }
 
     pub fn app_state(&self) -> &Arc<AppState> {
@@ -4768,7 +4821,7 @@ impl Workspace {
                         focus_center = true;
                     }
                 } else {
-                    let focus_handle = active_panel.activation_focus_handle(cx);
+                    let focus_handle = self.dock_panel_focus_handle(active_panel.as_ref(), cx);
                     window.focus(&focus_handle, cx);
                     reveal_dock = true;
                 }
@@ -4885,7 +4938,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Entity<T>> {
-        let panel = self.focus_or_unfocus_panel::<T>(window, cx, &mut |_, _, _| true)?;
+        let panel = self.focus_or_unfocus_panel::<T>(window, cx, &mut |_, _, _, _| true)?;
         panel.to_any().downcast().ok()
     }
 
@@ -4899,10 +4952,15 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> bool {
         let mut did_focus_panel = false;
-        self.focus_or_unfocus_panel::<T>(window, cx, &mut |panel, window, cx| {
-            did_focus_panel = !panel.panel_focus_handle(cx).contains_focused(window, cx);
-            did_focus_panel
-        });
+        self.focus_or_unfocus_panel::<T>(
+            window,
+            cx,
+            &mut |panel, window, cx, switched_from_threads| {
+                did_focus_panel = switched_from_threads
+                    || !panel.panel_focus_handle(cx).contains_focused(window, cx);
+                did_focus_panel
+            },
+        );
 
         if !did_focus_panel && WorkspaceSettings::get_global(cx).close_panel_on_toggle {
             self.close_panel::<T>(window, cx);
@@ -4937,7 +4995,11 @@ impl Workspace {
                 panel = dock.update(cx, |dock, cx| {
                     dock.activate_panel(panel_index, window, cx);
                     dock.set_open(true, window, cx);
-                    dock.active_panel().cloned()
+                    let panel = dock.active_panel().cloned();
+                    if let Some(panel) = &panel {
+                        self.dismiss_threads_sidebar(panel.as_ref(), cx);
+                    }
+                    panel
                 });
                 break;
             }
@@ -4956,7 +5018,12 @@ impl Workspace {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        should_focus: &mut dyn FnMut(&dyn PanelHandle, &mut Window, &mut Context<Dock>) -> bool,
+        should_focus: &mut dyn FnMut(
+            &dyn PanelHandle,
+            &mut Window,
+            &mut Context<Dock>,
+            bool,
+        ) -> bool,
     ) -> Option<Arc<dyn PanelHandle>> {
         let mut result_panel = None;
         let mut serialize = false;
@@ -4968,7 +5035,9 @@ impl Workspace {
 
                     let panel = dock.active_panel().cloned();
                     if let Some(panel) = panel.as_ref() {
-                        if should_focus(&**panel, window, cx) {
+                        let switched_from_threads =
+                            self.dismiss_threads_sidebar(panel.as_ref(), cx);
+                        if should_focus(&**panel, window, cx, switched_from_threads) {
                             dock.set_open(true, window, cx);
                             panel.activation_focus_handle(cx).focus(window, cx);
                         } else {
@@ -5003,6 +5072,9 @@ impl Workspace {
             if let Some(panel_index) = dock.read(cx).panel_index_for_type::<T>() {
                 dock.update(cx, |dock, cx| {
                     dock.activate_panel(panel_index, window, cx);
+                    if let Some(panel) = dock.active_panel() {
+                        self.dismiss_threads_sidebar(panel.as_ref(), cx);
+                    }
                     dock.set_open(true, window, cx);
                 });
             }
@@ -5049,12 +5121,26 @@ impl Workspace {
                 }
                 let panel = dock.active_panel()?;
                 if panel.is_zoomed(window, cx) {
-                    Some(panel.activation_focus_handle(cx))
+                    Some(self.dock_panel_focus_handle(panel.as_ref(), cx))
                 } else {
                     None
                 }
             })
             .unwrap_or_else(|| self.active_pane.read(cx).focus_handle(cx))
+    }
+
+    pub(crate) fn dock_panel_focus_handle(&self, panel: &dyn PanelHandle, cx: &App) -> FocusHandle {
+        if panel.remote_id() == Some(PanelId::AssistantPanel)
+            && self.owns_window_chrome()
+            && self
+                .threads_sidebar_open
+                .as_ref()
+                .is_some_and(|open| open.get())
+            && let Some(focus_handle) = &self.sidebar_focus_handle
+        {
+            return focus_handle.clone();
+        }
+        panel.activation_focus_handle(cx)
     }
 
     fn dismiss_zoomed_items_to_reveal(
@@ -5956,35 +6042,26 @@ impl Workspace {
     ) {
         use ActivateInDirectionTarget as Target;
         enum Origin {
-            Sidebar,
             LeftDock,
             RightDock,
             BottomDock,
             Center,
         }
 
-        let origin: Origin = if self
-            .sidebar_focus_handle
-            .as_ref()
-            .is_some_and(|h| h.contains_focused(window, cx))
-        {
-            Origin::Sidebar
-        } else {
-            [
-                (&self.left_dock, Origin::LeftDock),
-                (&self.right_dock, Origin::RightDock),
-                (&self.bottom_dock, Origin::BottomDock),
-            ]
-            .into_iter()
-            .find_map(|(dock, origin)| {
-                if dock.focus_handle(cx).contains_focused(window, cx) && dock.read(cx).is_open() {
-                    Some(origin)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(Origin::Center)
-        };
+        let origin = [
+            (&self.left_dock, Origin::LeftDock),
+            (&self.right_dock, Origin::RightDock),
+            (&self.bottom_dock, Origin::BottomDock),
+        ]
+        .into_iter()
+        .find_map(|(dock, origin)| {
+            let dock = dock.read(cx);
+            let panel = dock.visible_panel()?;
+            (dock.focus_handle(cx).contains_focused(window, cx)
+                || panel.panel_focus_handle(cx).contains_focused(window, cx))
+            .then_some(origin)
+        })
+        .unwrap_or(Origin::Center);
 
         let get_last_active_pane = || {
             let pane = self
@@ -6003,39 +6080,7 @@ impl Workspace {
         let try_dock =
             |dock: &Entity<Dock>| dock.read(cx).is_open().then(|| Target::Dock(dock.clone()));
 
-        let sidebar_target = self
-            .sidebar_focus_handle
-            .as_ref()
-            .map(|h| Target::Sidebar(h.clone()));
-
-        let sidebar_on_right = self
-            .multi_workspace
-            .as_ref()
-            .and_then(|mw| mw.upgrade())
-            .map_or(false, |mw| {
-                mw.read(cx).sidebar_side(cx) == SidebarSide::Right
-            });
-
-        let away_from_sidebar = if sidebar_on_right {
-            SplitDirection::Left
-        } else {
-            SplitDirection::Right
-        };
-
-        let (near_dock, far_dock) = if sidebar_on_right {
-            (&self.right_dock, &self.left_dock)
-        } else {
-            (&self.left_dock, &self.right_dock)
-        };
-
         let target = match (origin, direction) {
-            (Origin::Sidebar, dir) if dir == away_from_sidebar => try_dock(near_dock)
-                .or_else(|| get_last_active_pane().map(Target::Pane))
-                .or_else(|| try_dock(&self.bottom_dock))
-                .or_else(|| try_dock(far_dock)),
-
-            (Origin::Sidebar, _) => None,
-
             // We're in the center, so we first try to go to a different pane,
             // otherwise try to go to a dock.
             (Origin::Center, direction) => {
@@ -6045,22 +6090,8 @@ impl Workspace {
                     match direction {
                         SplitDirection::Up => None,
                         SplitDirection::Down => try_dock(&self.bottom_dock),
-                        SplitDirection::Left => {
-                            let dock_target = try_dock(&self.left_dock);
-                            if sidebar_on_right {
-                                dock_target
-                            } else {
-                                dock_target.or(sidebar_target)
-                            }
-                        }
-                        SplitDirection::Right => {
-                            let dock_target = try_dock(&self.right_dock);
-                            if sidebar_on_right {
-                                dock_target.or(sidebar_target)
-                            } else {
-                                dock_target
-                            }
-                        }
+                        SplitDirection::Left => try_dock(&self.left_dock),
+                        SplitDirection::Right => try_dock(&self.right_dock),
                     }
                 }
             }
@@ -6073,48 +6104,18 @@ impl Workspace {
                 }
             }
 
-            (Origin::LeftDock, SplitDirection::Left) => {
-                if sidebar_on_right {
-                    None
-                } else {
-                    sidebar_target
-                }
-            }
-
             (Origin::LeftDock, SplitDirection::Down)
             | (Origin::RightDock, SplitDirection::Down) => try_dock(&self.bottom_dock),
 
             (Origin::BottomDock, SplitDirection::Up) => get_last_active_pane().map(Target::Pane),
-            (Origin::BottomDock, SplitDirection::Left) => {
-                let dock_target = try_dock(&self.left_dock);
-                if sidebar_on_right {
-                    dock_target
-                } else {
-                    dock_target.or(sidebar_target)
-                }
-            }
-            (Origin::BottomDock, SplitDirection::Right) => {
-                let dock_target = try_dock(&self.right_dock);
-                if sidebar_on_right {
-                    dock_target.or(sidebar_target)
-                } else {
-                    dock_target
-                }
-            }
+            (Origin::BottomDock, SplitDirection::Left) => try_dock(&self.left_dock),
+            (Origin::BottomDock, SplitDirection::Right) => try_dock(&self.right_dock),
 
             (Origin::RightDock, SplitDirection::Left) => {
                 if let Some(last_active_pane) = get_last_active_pane() {
                     Some(Target::Pane(last_active_pane))
                 } else {
                     try_dock(&self.bottom_dock).or_else(|| try_dock(&self.left_dock))
-                }
-            }
-
-            (Origin::RightDock, SplitDirection::Right) => {
-                if sidebar_on_right {
-                    sidebar_target
-                } else {
-                    None
                 }
             }
 
@@ -6133,19 +6134,20 @@ impl Workspace {
                 }
             }
             Some(ActivateInDirectionTarget::Dock(dock)) => {
+                let workspace = self.weak_self.clone();
                 // Defer this to avoid a panic when the dock's active panel is already on the stack.
                 window.defer(cx, move |window, cx| {
                     let dock = dock.read(cx);
                     if let Some(panel) = dock.active_panel() {
-                        panel.activation_focus_handle(cx).focus(window, cx);
+                        if let Some(workspace) = workspace.upgrade() {
+                            workspace.read(cx).dock_panel_focus_handle(panel.as_ref(), cx).focus(window, cx);
+                        }
                     } else {
                         log::error!("Could not find a focus target when in switching focus in {direction} direction for a {:?} dock", dock.position());
                     }
                 })
             }
-            Some(ActivateInDirectionTarget::Sidebar(focus_handle)) => {
-                focus_handle.focus(window, cx);
-            }
+
             None => {}
         }
     }
@@ -9142,12 +9144,12 @@ impl Workspace {
         // The interactive focus target inside an open dock: the active panel, or
         // the dock itself as a fallback. This is what region navigation focuses
         // when no screen reader is active (preserving the previous behavior).
-        fn dock_content_handle(dock: &Entity<Dock>, cx: &App) -> FocusHandle {
+        let dock_content_handle = |dock: &Entity<Dock>, cx: &App| {
             let dock = dock.read(cx);
             dock.active_panel()
-                .map(|panel| panel.activation_focus_handle(cx))
+                .map(|panel| self.dock_panel_focus_handle(panel.as_ref(), cx))
                 .unwrap_or_else(|| dock.focus_handle(cx))
-        }
+        };
 
         let dock_part = |dock: &Entity<Dock>, wrapper: &FocusHandle| {
             dock.read(cx)
@@ -9904,7 +9906,6 @@ fn open_items(
 enum ActivateInDirectionTarget {
     Pane(Entity<Pane>),
     Dock(Entity<Dock>),
-    Sidebar(FocusHandle),
 }
 
 /// A focusable major window region used by region navigation

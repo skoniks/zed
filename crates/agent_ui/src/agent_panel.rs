@@ -2938,8 +2938,8 @@ impl AgentPanel {
 
         if let Some(multi_workspace) = window.root::<MultiWorkspace>().flatten() {
             let multi_workspace = multi_workspace.read(cx);
-            if multi_workspace.sidebar_open() && multi_workspace.is_threads_list_view_active(cx) {
-                return true;
+            if multi_workspace.sidebar_visible(cx) {
+                return multi_workspace.is_threads_list_view_active(cx);
             }
 
             let Some(workspace) = self.workspace.upgrade() else {
@@ -6632,6 +6632,27 @@ impl AgentPanel {
 
 impl Render for AgentPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(sidebar) =
+            window
+                .root::<MultiWorkspace>()
+                .flatten()
+                .and_then(|multi_workspace| {
+                    let multi_workspace = multi_workspace.read(cx);
+                    if multi_workspace.sidebar_open() && multi_workspace.multi_workspace_enabled(cx)
+                    {
+                        multi_workspace.sidebar().map(|sidebar| sidebar.to_any())
+                    } else {
+                        None
+                    }
+                })
+        {
+            return v_flex()
+                .track_focus(&self.focus_handle)
+                .size_full()
+                .child(sidebar)
+                .into_any();
+        }
+
         // WARNING: Changes to this element hierarchy can have
         // non-obvious implications to the layout of children.
         //

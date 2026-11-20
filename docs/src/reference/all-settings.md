@@ -147,51 +147,11 @@ See [Agent Panel visual customization](../visual-customization.md#agent-panel) f
 
 ### Threads Sidebar Position {#agent-threads-sidebar-position}
 
-- Description: Which side of the window displays the [Threads Sidebar](../ai/parallel-agents.md#threads-sidebar).
-- Setting: `agent.threads_sidebar.position`
-- Default: `"left"`
-
-**Options**
-
-`"left"` or `"right"`.
-
-Open the Settings Editor and search for “Threads Sidebar Position”. Or add this to your `settings.json`:
-
-```json [settings]
-{
-  "agent": {
-    "threads_sidebar": {
-      "position": "right"
-    }
-  }
-}
-```
+Deprecated. The [Threads Sidebar](../ai/parallel-agents.md#threads-sidebar) now follows the Agent Panel's `agent.dock` setting.
 
 ### Threads Sidebar Default Width {#agent-threads-sidebar-default-width}
 
-- Description: Default width in pixels of the [Threads Sidebar](../ai/parallel-agents.md#threads-sidebar).
-- Setting: `agent.threads_sidebar.default_width`
-- Default: `300`
-
-**Options**
-
-Numbers from `200` to `800` pixels (inclusive). Values outside this range are clamped to the nearest limit.
-
-Open the Settings Editor and search for “Threads Sidebar Default Width”. Or add this to your `settings.json`:
-
-```json [settings]
-{
-  "agent": {
-    "threads_sidebar": {
-      "default_width": 360
-    }
-  }
-}
-```
-
-Changing this setting immediately updates the sidebar width, even if you previously resized it manually. You can also double-click the divider to reset the sidebar to the configured width.
-
-Widths saved by older versions of Zed are preserved if they differ from the previous default of 300 pixels. A saved width of 300 pixels uses this setting instead.
+Deprecated. The Threads Sidebar now shares the Agent Panel's width, including its [fixed or flexible sizing](#agent-panel-flexible-sizing).
 
 ### Threads Sidebar Auto Open {#agent-threads-sidebar-auto-open}
 

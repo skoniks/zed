@@ -45,16 +45,9 @@ pub struct ThreadsSidebarSettingsContent {
     ///
     /// Default: true
     pub auto_open: Option<bool>,
-    /// Where to position the threads sidebar.
-    ///
-    /// Default: left
+    /// Deprecated. The Threads Sidebar now follows `agent.dock`.
     pub position: Option<SidebarDockPosition>,
-    /// Default width of the threads sidebar in pixels.
-    ///
-    /// Values range from 200 to 800, matching the widths the sidebar can be
-    /// dragged to. Values outside that range are clamped into it.
-    ///
-    /// Default: 300
+    /// Deprecated. The Threads Sidebar now shares the Agent Panel's width.
     #[schemars(range(min = 200, max = 800))]
     pub default_width: Option<crate::PixelSetting>,
 }

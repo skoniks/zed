@@ -11,16 +11,16 @@ use crate::{Agent, ArchiveSelectedThread, DEFAULT_THREAD_TITLE, RemoveSelectedTh
 
 use agent::ThreadStore;
 use agent_client_protocol::v2::schema as acp;
-use agent_settings::AgentSettings;
+
 use chrono::{DateTime, Datelike as _, Local, NaiveDate, TimeDelta, Utc};
 use collections::HashMap;
 use editor::Editor;
 use fs::Fs;
 use fuzzy::{StringMatch, StringMatchCandidate};
 use gpui::{
-    AnyElement, App, Context, Decorations, DismissEvent, Entity, EventEmitter, FocusHandle,
-    Focusable, ListState, Render, SharedString, Subscription, Task, TaskExt, WeakEntity, Window,
-    list, prelude::*, px,
+    AnyElement, App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
+    ListState, Render, SharedString, Subscription, Task, TaskExt, WeakEntity, Window, list,
+    prelude::*, px,
 };
 use itertools::Itertools as _;
 use menu::{Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
@@ -28,20 +28,17 @@ use picker::{
     Picker, PickerDelegate,
     highlighted_match_with_paths::{HighlightedMatch, HighlightedMatchWithPaths},
 };
-use platform_title_bar::{SidebarWindowControls, TitleBarSettings, apply_title_bar_insets};
 use project::{AgentId, AgentServerStore};
-use settings::Settings as _;
 use theme::ActiveTheme;
 use ui::{
     AgentThreadStatus, Divider, KeyBinding, ListItem, ListItemSpacing, ListSubHeader, ScrollAxes,
     Scrollbars, Tab, ThreadItem, Tooltip, WithScrollbar, prelude::*,
-    utils::platform_title_bar_height,
 };
 use util::ResultExt;
 use util::paths::PathExt;
 use workspace::{
-    CloseWindow, ModalView, PathList, RecentWorkspace, SerializedWorkspaceLocation, Workspace,
-    WorkspaceDb, WorkspaceId, dedupe_recent_workspaces,
+    ModalView, PathList, RecentWorkspace, SerializedWorkspaceLocation, Workspace, WorkspaceDb,
+    WorkspaceId, dedupe_recent_workspaces,
 };
 
 use zed_actions::agents_sidebar::FocusSidebarFilter;
@@ -859,57 +856,18 @@ impl ThreadsArchiveView {
 
     fn render_header(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let has_query = !self.filter_editor.read(cx).text(cx).is_empty();
-        let SidebarWindowControls {
-            traffic_lights,
-            left: left_window_controls,
-            right: right_window_controls,
-        } = SidebarWindowControls::new(AgentSettings::get_global(cx).sidebar_side(), window, cx);
-        let title_bar_visible = TitleBarSettings::is_title_bar_visible(window, cx);
-        let header_height = if title_bar_visible {
-            platform_title_bar_height(window)
-        } else {
-            Tab::container_height(cx)
-        };
+
         let show_focus_keybinding =
             self.selection.is_some() && !self.filter_editor.focus_handle(cx).is_focused(window);
 
         h_flex()
             .debug_selector(|| "threads-archive-header".into())
-            .h(header_height)
-            .map(|header| {
-                if !title_bar_visible {
-                    return header.mt_px();
-                }
-                match window.window_decorations() {
-                    Decorations::Client { .. } => apply_title_bar_insets(
-                        header,
-                        left_window_controls,
-                        right_window_controls,
-                        false,
-                    ),
-                    Decorations::Server => header.mt_px().pb_px(),
-                }
-            })
-            .when(left_window_controls, |this| {
-                this.children(Self::render_left_window_controls(window, cx))
-            })
-            .map(|this| {
-                if traffic_lights {
-                    this.pl(px(ui::utils::TRAFFIC_LIGHT_PADDING))
-                } else if !left_window_controls {
-                    this.pl_1p5()
-                } else {
-                    this
-                }
-            })
-            .when(!right_window_controls, |this| this.pr_1p5())
+            .h(Tab::container_height(cx))
+            .px_1p5()
             .gap_1()
             .justify_between()
             .border_b_1()
             .border_color(cx.theme().colors().border)
-            .when(traffic_lights, |this| {
-                this.child(Divider::vertical().color(ui::DividerColor::Border))
-            })
             .child(
                 h_flex()
                     .debug_selector(|| "threads-archive-header-search".into())
@@ -938,25 +896,6 @@ impl ThreadsArchiveView {
                         })),
                 )
             })
-            .when(right_window_controls, |this| {
-                this.children(Self::render_right_window_controls(window, cx))
-            })
-    }
-
-    fn render_left_window_controls(window: &Window, cx: &mut App) -> Option<AnyElement> {
-        platform_title_bar::render_left_window_controls(
-            cx.button_layout(),
-            Box::new(CloseWindow),
-            window,
-        )
-    }
-
-    fn render_right_window_controls(window: &Window, cx: &mut App) -> Option<AnyElement> {
-        platform_title_bar::render_right_window_controls(
-            cx.button_layout(),
-            Box::new(CloseWindow),
-            window,
-        )
     }
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {

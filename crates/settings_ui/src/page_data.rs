@@ -9102,7 +9102,7 @@ fn collaboration_page() -> SettingsPage {
 }
 
 fn ai_page(cx: &App) -> SettingsPage {
-    fn general_section() -> [SettingsPageItem; 8] {
+    fn general_section() -> [SettingsPageItem; 6] {
         [
             SettingsPageItem::SectionHeader("General"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -9118,56 +9118,6 @@ fn ai_page(cx: &App) -> SettingsPage {
                 }),
                 metadata: None,
                 files: USER | PROJECT,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Threads Sidebar Position",
-                description: "Which side of the window the Threads Sidebar appears on.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("agent.threads_sidebar.position"),
-                    pick: |settings_content| {
-                        settings_content
-                            .agent
-                            .as_ref()?
-                            .threads_sidebar
-                            .as_ref()?
-                            .position
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .agent
-                            .get_or_insert_default()
-                            .set_threads_sidebar_position(value);
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Threads Sidebar Default Width",
-                description: "Default width of the Threads Sidebar. Changing this setting also updates a manually resized sidebar. Double-click the divider to reset to this width.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("agent.threads_sidebar.default_width"),
-                    pick: |settings_content| {
-                        settings_content
-                            .agent
-                            .as_ref()?
-                            .threads_sidebar
-                            .as_ref()?
-                            .default_width
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .agent
-                            .get_or_insert_default()
-                            .set_threads_sidebar_default_width(value);
-                    },
-                }),
-                metadata: None,
-                files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Threads Sidebar Auto Open",

@@ -24,16 +24,14 @@ use gpui::{
 use platform_title_bar::PlatformTitleBar;
 use pretty_assertions::assert_eq;
 use project::AgentId;
-use settings::{
-    FontSize, Settings, SettingsStore, SidebarDockPosition, TitleBarVisibility, UiDensity,
-};
+use settings::{FontSize, Settings, SettingsStore, TitleBarVisibility, UiDensity};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
 use util::{path_list::PathList, rel_path::rel_path};
 use workspace::{
-    dock::{DockPosition, PanelEvent, test::TestPanel},
+    dock::{Panel, PanelSizeState},
     item::test::TestItem,
 };
 
@@ -903,8 +901,8 @@ fn setup_sidebar(
     cx: &mut gpui::VisualTestContext,
 ) -> Entity<Sidebar> {
     let sidebar = setup_sidebar_closed(multi_workspace, cx);
-    multi_workspace.update_in(cx, |mw, window, cx| {
-        mw.toggle_sidebar(window, cx);
+    multi_workspace.update(cx, |multi_workspace, cx| {
+        multi_workspace.open_sidebar(cx);
     });
     cx.run_until_parked();
     sidebar
@@ -1199,6 +1197,22 @@ fn save_draft_metadata_with_main_paths(
 }
 
 fn focus_sidebar(sidebar: &Entity<Sidebar>, cx: &mut gpui::VisualTestContext) {
+    let multi_workspace = sidebar.read_with(cx, |sidebar, _| {
+        sidebar.multi_workspace.upgrade().expect("test workspace")
+    });
+    let workspace =
+        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+    if workspace.read_with(cx, |workspace, cx| {
+        workspace.panel::<AgentPanel>(cx).is_none()
+    }) {
+        add_agent_panel(&workspace, cx);
+    }
+    if !multi_workspace.read_with(cx, |multi_workspace, cx| {
+        multi_workspace.sidebar_visible(cx)
+    }) {
+        multi_workspace.update(cx, |multi_workspace, cx| multi_workspace.open_sidebar(cx));
+        cx.run_until_parked();
+    }
     sidebar.update_in(cx, |_, window, cx| {
         cx.focus_self(window);
     });
@@ -2563,7 +2577,8 @@ async fn test_refocus_sidebar_with_selection_preserves_it(cx: &mut TestAppContex
 
 #[gpui::test]
 async fn test_leaving_sidebar_after_previous_focus_target_is_removed(cx: &mut TestAppContext) {
-    let project = init_test_project("/my-project", cx).await;
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    cx.update(|cx| AgentRegistryStore::init_test_global(cx, Vec::new()));
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
     let sidebar = setup_sidebar_closed(&multi_workspace, cx);
@@ -2571,15 +2586,10 @@ async fn test_leaving_sidebar_after_previous_focus_target_is_removed(cx: &mut Te
         multi_workspace.workspace().clone()
     });
     let title_bar = cx.new(TestItem::new);
-    let panel = workspace.update_in(cx, |workspace, window, cx| {
+    add_agent_panel(&workspace, cx);
+    workspace.update_in(cx, |workspace, window, cx| {
         workspace.set_titlebar_item(AnyView::from(title_bar.clone()), window, cx);
-        let panel = cx.new(|cx| TestPanel::new(DockPosition::Right, 100, cx));
-        workspace.add_panel(panel.clone(), window, cx);
-        workspace.toggle_dock(DockPosition::Right, window, cx);
-        panel
     });
-    cx.run_until_parked();
-    panel.update(cx, |_, cx| cx.emit(PanelEvent::ZoomIn));
     cx.run_until_parked();
     title_bar.update_in(cx, |title_bar, window, cx| {
         title_bar.focus_handle(cx).focus(window, cx);
@@ -2587,28 +2597,26 @@ async fn test_leaving_sidebar_after_previous_focus_target_is_removed(cx: &mut Te
     cx.run_until_parked();
     let focus_state = |cx: &mut VisualTestContext| {
         cx.update(|window, cx| {
-            let focused_region = [
+            [
                 (FocusedRegion::TitleBar, title_bar.focus_handle(cx)),
                 (FocusedRegion::Sidebar, sidebar.focus_handle(cx)),
-                (FocusedRegion::Panel, panel.focus_handle(cx)),
                 (FocusedRegion::Pane, workspace.focus_handle(cx)),
             ]
             .into_iter()
             .find_map(|(region, focus_handle)| {
                 focus_handle.contains_focused(window, cx).then_some(region)
-            });
-            (focused_region, panel.read(cx).zoomed)
+            })
         })
     };
-    assert_eq!(focus_state(cx), (Some(FocusedRegion::TitleBar), true));
+    assert_eq!(focus_state(cx), Some(FocusedRegion::TitleBar));
 
     cx.dispatch_action(FocusWorkspaceSidebar);
     cx.run_until_parked();
-    assert_eq!(focus_state(cx), (Some(FocusedRegion::Sidebar), true));
+    assert_eq!(focus_state(cx), Some(FocusedRegion::Sidebar));
 
     cx.dispatch_action(FocusWorkspaceSidebar);
     cx.run_until_parked();
-    assert_eq!(focus_state(cx), (Some(FocusedRegion::TitleBar), true));
+    assert_eq!(focus_state(cx), Some(FocusedRegion::TitleBar));
 
     cx.dispatch_action(FocusWorkspaceSidebar);
     cx.run_until_parked();
@@ -2616,22 +2624,24 @@ async fn test_leaving_sidebar_after_previous_focus_target_is_removed(cx: &mut Te
         workspace.clear_titlebar_item(window, cx);
     });
     cx.run_until_parked();
-    assert_eq!(focus_state(cx), (Some(FocusedRegion::Sidebar), true));
+    assert_eq!(focus_state(cx), Some(FocusedRegion::Sidebar));
 
     cx.dispatch_action(FocusWorkspaceSidebar);
     cx.run_until_parked();
-    assert_eq!(focus_state(cx), (Some(FocusedRegion::Panel), true));
+    assert_eq!(focus_state(cx), Some(FocusedRegion::Pane));
 }
 
 #[gpui::test]
-async fn test_window_frame_corners_follow_content(cx: &mut TestAppContext) {
-    let project = init_test_project("/my-project", cx).await;
+async fn test_threads_sidebar_does_not_change_window_corners(cx: &mut TestAppContext) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    cx.update(|cx| AgentRegistryStore::init_test_global(cx, Vec::new()));
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
     setup_sidebar_closed(&multi_workspace, cx);
     let workspace = multi_workspace.read_with(cx, |multi_workspace, _cx| {
         multi_workspace.workspace().clone()
     });
+    add_agent_panel(&workspace, cx);
     let window_handle = cx.update(|window, _| window.window_handle());
     cx.simulate_window_decorations_change(
         window_handle,
@@ -2639,112 +2649,41 @@ async fn test_window_frame_corners_follow_content(cx: &mut TestAppContext) {
             tiling: Tiling::default(),
         },
     );
-    let title_bar = cx.new(|cx| {
-        PlatformTitleBar::new("title-bar", cx).with_multi_workspace(multi_workspace.downgrade())
-    });
+    let title_bar = cx.new(|cx| PlatformTitleBar::new("title-bar", cx));
     workspace.update_in(cx, |workspace, window, cx| {
         workspace.set_titlebar_item(AnyView::from(title_bar), window, cx);
     });
-    cx.run_until_parked();
-    assert_eq!(
-        window_corners(cx),
-        WindowCorners {
-            top_left: WindowCorner::Rounded,
-            top_right: WindowCorner::Rounded,
-            bottom_left: WindowCorner::Rounded,
-            bottom_right: WindowCorner::Rounded,
-        },
-        "title bar and status bar shown"
-    );
 
-    workspace.update_in(cx, |workspace, window, cx| {
-        workspace.clear_titlebar_item(window, cx);
-    });
-    cx.run_until_parked();
-    assert_eq!(
-        window_corners(cx),
-        WindowCorners {
-            top_left: WindowCorner::Square,
-            top_right: WindowCorner::Square,
-            bottom_left: WindowCorner::Rounded,
-            bottom_right: WindowCorner::Rounded,
-        },
-        "title bar hidden"
-    );
-
-    cx.update_global::<SettingsStore, _>(|store, cx| {
-        store.update_user_settings(cx, |settings| {
-            settings.status_bar.get_or_insert_default().show = Some(false);
+    for (title_bar_visible, status_bar_visible) in [(true, true), (false, true), (false, false)] {
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.status_bar.get_or_insert_default().show = Some(status_bar_visible);
+            });
         });
-    });
-    cx.run_until_parked();
-    assert_eq!(
-        window_corners(cx),
-        WindowCorners {
-            top_left: WindowCorner::Square,
-            top_right: WindowCorner::Square,
-            bottom_left: WindowCorner::Square,
-            bottom_right: WindowCorner::Square,
-        },
-        "title bar and status bar hidden"
-    );
+        workspace.update_in(cx, |workspace, window, cx| {
+            if !title_bar_visible {
+                workspace.clear_titlebar_item(window, cx);
+            }
+            workspace.focus_panel::<AgentPanel>(window, cx);
+        });
+        cx.run_until_parked();
+        let agent_corners = window_corners(cx);
 
-    multi_workspace.update_in(cx, |multi_workspace, window, cx| {
-        multi_workspace.toggle_sidebar(window, cx);
-    });
-    cx.run_until_parked();
-    assert_eq!(
-        window_corners(cx),
-        WindowCorners {
-            top_left: WindowCorner::Rounded,
-            top_right: WindowCorner::Square,
-            bottom_left: WindowCorner::Rounded,
-            bottom_right: WindowCorner::Square,
-        },
-        "title bar and status bar hidden, sidebar open on the left"
-    );
-
-    cx.update(|_, cx| {
-        let mut settings = AgentSettings::get_global(cx).clone();
-        settings.threads_sidebar.position = SidebarDockPosition::Right;
-        AgentSettings::override_global(settings, cx);
-    });
-    multi_workspace.update(cx, |_, cx| cx.notify());
-    cx.run_until_parked();
-    assert_eq!(
-        window_corners(cx),
-        WindowCorners {
-            top_left: WindowCorner::Square,
-            top_right: WindowCorner::Rounded,
-            bottom_left: WindowCorner::Square,
-            bottom_right: WindowCorner::Rounded,
-        },
-        "title bar and status bar hidden, sidebar open on the right"
-    );
-}
-
-#[cfg(target_os = "macos")]
-#[gpui::test]
-async fn test_headers_follow_title_bar_visibility(cx: &mut TestAppContext) {
-    let project = init_test_project_with_agent_panel("/my-project", cx).await;
-    cx.update(|cx| AgentRegistryStore::init_test_global(cx, Vec::new()));
-    let (multi_workspace, cx) =
-        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
-    let (sidebar, _panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
-
-    let thread_list = header_search_offsets("sidebar-header-search", cx);
-    assert_eq!(thread_list.hidden, thread_list.fullscreen);
-    assert_ne!(thread_list.hidden, thread_list.shown);
-
-    sidebar.update_in(cx, |sidebar, window, cx| sidebar.show_archive(window, cx));
-    cx.run_until_parked();
-    let archive = header_search_offsets("threads-archive-header-search", cx);
-    assert_eq!(archive.hidden, archive.fullscreen);
-    assert_ne!(archive.hidden, archive.shown);
+        multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+            multi_workspace.toggle_sidebar(window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-header").is_some());
+        assert_eq!(
+            window_corners(cx),
+            agent_corners,
+            "Threads must not change the window frame (title bar: {title_bar_visible}, status bar: {status_bar_visible})"
+        );
+    }
 }
 
 #[gpui::test]
-async fn test_header_alignment_with_title_bar_and_tabs(cx: &mut TestAppContext) {
+async fn test_threads_headers_align_with_editor_tabs(cx: &mut TestAppContext) {
     let project = init_test_project_with_agent_panel("/my-project", cx).await;
     cx.update(|cx| AgentRegistryStore::init_test_global(cx, Vec::new()));
     let (multi_workspace, cx) =
@@ -2752,9 +2691,7 @@ async fn test_header_alignment_with_title_bar_and_tabs(cx: &mut TestAppContext) 
     let (sidebar, _panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
     let workspace =
         multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
-    let title_bar = cx.new(|cx| {
-        PlatformTitleBar::new("title-bar", cx).with_multi_workspace(multi_workspace.downgrade())
-    });
+    let title_bar = cx.new(|cx| PlatformTitleBar::new("title-bar", cx));
     workspace.update_in(cx, |workspace, window, cx| {
         let item = cx.new(TestItem::new);
         workspace.add_item_to_active_pane(Box::new(item), None, false, window, cx);
@@ -2768,20 +2705,14 @@ async fn test_header_alignment_with_title_bar_and_tabs(cx: &mut TestAppContext) 
         if header_selector == "threads-archive-header" {
             sidebar.update_in(cx, |sidebar, window, cx| sidebar.show_archive(window, cx));
         }
-        for ((font_size, density, decorations, position), scale_factor) in [
-            (
-                12.,
-                UiDensity::Compact,
-                Decorations::Server,
-                SidebarDockPosition::Left,
-            ),
+        for ((font_size, density, decorations), scale_factor) in [
+            (12., UiDensity::Compact, Decorations::Server),
             (
                 16.,
                 UiDensity::Default,
                 Decorations::Client {
                     tiling: Tiling::default(),
                 },
-                SidebarDockPosition::Left,
             ),
             (
                 24.,
@@ -2789,20 +2720,6 @@ async fn test_header_alignment_with_title_bar_and_tabs(cx: &mut TestAppContext) 
                 Decorations::Client {
                     tiling: Tiling::default(),
                 },
-                SidebarDockPosition::Right,
-            ),
-            (
-                16.,
-                UiDensity::Comfortable,
-                Decorations::Client {
-                    tiling: Tiling {
-                        top: true,
-                        left: true,
-                        right: true,
-                        bottom: true,
-                    },
-                },
-                SidebarDockPosition::Right,
             ),
         ]
         .into_iter()
@@ -2810,6 +2727,7 @@ async fn test_header_alignment_with_title_bar_and_tabs(cx: &mut TestAppContext) 
         {
             cx.simulate_scale_factor_change(scale_factor);
             cx.simulate_window_decorations_change(window_handle, decorations);
+            let mut search_inset = None;
             for (visibility, fullscreen, title_bar_visible) in [
                 (TitleBarVisibility::Always, false, true),
                 (TitleBarVisibility::Never, false, false),
@@ -2822,12 +2740,6 @@ async fn test_header_alignment_with_title_bar_and_tabs(cx: &mut TestAppContext) 
                         settings.title_bar.get_or_insert_default().show = Some(visibility);
                         settings.theme.ui_font_size = Some(FontSize(font_size));
                         settings.theme.ui_density = Some(density);
-                        settings
-                            .agent
-                            .get_or_insert_default()
-                            .threads_sidebar
-                            .get_or_insert_default()
-                            .position = Some(position);
                     });
                 });
                 workspace.update_in(cx, |workspace, window, cx| {
@@ -2850,23 +2762,16 @@ async fn test_header_alignment_with_title_bar_and_tabs(cx: &mut TestAppContext) 
                 let search = cx
                     .debug_bounds(search_selector)
                     .expect("search is rendered");
-                let center = if title_bar_visible {
-                    assert_eq!(header.bottom(), tab.top());
-                    match decorations {
-                        Decorations::Client { .. } => header.center().y,
-                        Decorations::Server => header.center().y - px(1.),
-                    }
-                } else {
-                    assert_eq!(header.top(), tab.top());
-                    assert_eq!(header.bottom(), tab.bottom());
-                    tab.center().y - px(0.5)
-                };
-                let expected_top =
-                    ((center - search.size.height / 2.) * scale_factor).floor() / scale_factor;
+                let layout = format!(
+                    "{header_selector}, {visibility:?}, fullscreen: {fullscreen}, {font_size}px, {scale_factor}x"
+                );
+                assert_eq!(header.size.height, tab.size.height, "{layout}");
+                assert_eq!(header.intersect(&search), search, "{layout}");
+                let inset = search.left() - header.left();
                 assert_eq!(
-                    search.top(),
-                    expected_top,
-                    "{header_selector}, {visibility:?}, {font_size}px, {scale_factor}x"
+                    inset,
+                    *search_inset.get_or_insert(inset),
+                    "{layout}: window controls must not shift the Threads search"
                 );
             }
         }
@@ -3159,10 +3064,94 @@ fn setup_sidebar_with_agent_panel(
     multi_workspace: &Entity<MultiWorkspace>,
     cx: &mut gpui::VisualTestContext,
 ) -> (Entity<Sidebar>, Entity<AgentPanel>) {
-    let sidebar = setup_sidebar(multi_workspace, cx);
     let workspace = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
     let panel = add_agent_panel(&workspace, cx);
+    let sidebar = setup_sidebar(multi_workspace, cx);
     (sidebar, panel)
+}
+
+#[gpui::test]
+async fn test_opening_existing_thread_keeps_agent_panel_and_dock_size(cx: &mut TestAppContext) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    cx.update(|cx| {
+        AgentRegistryStore::init_test_global(cx, Vec::new());
+        let mut settings = AgentSettings::get_global(cx).clone();
+        settings.flexible = false;
+        AgentSettings::override_global(settings, cx);
+    });
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
+    let workspace =
+        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+    let panel = add_agent_panel(&workspace, cx);
+
+    open_thread_with_connection(&panel, StubAgentConnection::new(), cx);
+    send_message(&panel, cx);
+    let existing_thread = active_thread_id(&panel, cx);
+    let existing_session = active_session_id(&panel, cx);
+    open_thread_with_connection(&panel, StubAgentConnection::new(), cx);
+    send_message(&panel, cx);
+    assert_ne!(active_thread_id(&panel, cx), existing_thread);
+
+    let size_state = PanelSizeState {
+        size: Some(px(420.)),
+        flex: None,
+    };
+    let dock = workspace.update_in(cx, |workspace, window, cx| {
+        let item = cx.new(TestItem::new);
+        workspace.add_item_to_active_pane(Box::new(item), None, false, window, cx);
+        assert!(workspace.set_panel_size_state::<AgentPanel>(size_state, window, cx));
+        assert_eq!(
+            workspace.focus_panel::<AgentPanel>(window, cx),
+            Some(panel.clone())
+        );
+        workspace
+            .dock_at_position(panel.read(cx).position(window, cx))
+            .clone()
+    });
+    cx.run_until_parked();
+
+    let panel_id = panel.entity_id();
+    let assert_same_dock = |cx: &VisualTestContext| {
+        dock.read_with(cx, |dock, _| {
+            assert_eq!(
+                dock.visible_panel().map(|panel| panel.panel_id()),
+                Some(panel_id)
+            );
+            assert_eq!(dock.active_panel_size(), Some(size_state));
+        });
+    };
+    assert_same_dock(cx);
+    let original_tab = cx
+        .debug_bounds("TAB-0")
+        .expect("editor tab should be visible");
+    assert!(cx.debug_bounds("sidebar-header").is_none());
+
+    multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        multi_workspace.toggle_sidebar(window, cx);
+    });
+    cx.run_until_parked();
+    assert_same_dock(cx);
+    assert!(cx.debug_bounds("sidebar-header").is_some());
+    assert_eq!(cx.debug_bounds("TAB-0"), Some(original_tab));
+
+    let fixture = SidebarClickFixture { sidebar, panel };
+    let thread_index = fixture.thread_index(&existing_session, cx);
+    let thread_bounds = fixture.sidebar.read_with(cx, |sidebar, _| {
+        sidebar
+            .list_state
+            .bounds_for_item(thread_index)
+            .expect("existing thread row should be visible")
+    });
+    cx.simulate_click(thread_bounds.center(), Modifiers::none());
+    cx.run_until_parked();
+
+    assert_eq!(active_thread_id(&fixture.panel, cx), existing_thread);
+    assert!(cx.debug_bounds("sidebar-header").is_none());
+    assert_eq!(cx.debug_bounds("TAB-0"), Some(original_tab));
+    assert_same_dock(cx);
 }
 
 #[gpui::test]
@@ -17816,7 +17805,6 @@ fn sidebar_painted_background_at(position: Point<Pixels>, cx: &mut VisualTestCon
 enum FocusedRegion {
     TitleBar,
     Sidebar,
-    Panel,
     Pane,
 }
 
@@ -17916,43 +17904,6 @@ fn rounded_bounds_contain(
                 distance_x <= 0. || distance_y <= 0. || distance_x.hypot(distance_y) <= radius.0
             },
         )
-}
-
-#[cfg(target_os = "macos")]
-struct HeaderSearchOffsets {
-    shown: Pixels,
-    hidden: Pixels,
-    fullscreen: Pixels,
-}
-
-#[cfg(target_os = "macos")]
-fn header_search_offsets(
-    selector: &'static str,
-    cx: &mut VisualTestContext,
-) -> HeaderSearchOffsets {
-    let offset = |visibility, cx: &mut VisualTestContext| {
-        cx.update_global::<SettingsStore, _>(|store, cx| {
-            store.update_user_settings(cx, |settings| {
-                settings.title_bar.get_or_insert_default().show = Some(visibility);
-            });
-        });
-        cx.run_until_parked();
-        cx.debug_bounds(selector)
-            .expect("header search is rendered")
-            .left()
-    };
-    let shown = offset(TitleBarVisibility::Always, cx);
-    let hidden = offset(TitleBarVisibility::Never, cx);
-    cx.update(|window, _| window.toggle_fullscreen());
-    cx.run_until_parked();
-    let fullscreen = offset(TitleBarVisibility::Always, cx);
-    cx.update(|window, _| window.toggle_fullscreen());
-    cx.run_until_parked();
-    HeaderSearchOffsets {
-        shown,
-        hidden,
-        fullscreen,
-    }
 }
 
 fn menu_label_names(labels: &[WorkspaceMenuWorktreeLabel]) -> Vec<(String, Option<String>)> {

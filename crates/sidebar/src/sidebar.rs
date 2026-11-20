@@ -28,9 +28,9 @@ use feature_flags::{
     AgentThreadWorktreeLabel, AgentThreadWorktreeLabelFlag, FeatureFlag, FeatureFlagAppExt as _,
 };
 use gpui::{
-    Action as _, AnyElement, App, ClickEvent, Context, Decorations, DismissEvent, Entity, EntityId,
-    FocusHandle, Focusable, KeyContext, ListState, Modifiers, Pixels, Render, SharedString, Task,
-    TaskExt, WeakEntity, Window, WindowBackgroundAppearance, WindowHandle, linear_color_stop,
+    Action as _, AnyElement, App, ClickEvent, Context, DismissEvent, Entity, EntityId, FocusHandle,
+    Focusable, KeyContext, ListState, Modifiers, Pixels, Render, SharedString, Task, TaskExt,
+    WeakEntity, Window, WindowBackgroundAppearance, WindowHandle, linear_color_stop,
     linear_gradient, list, prelude::*, px,
 };
 use itertools::Itertools;
@@ -39,11 +39,10 @@ use menu::{
     Cancel, Confirm, SelectChild, SelectFirst, SelectLast, SelectNext, SelectParent, SelectPrevious,
 };
 use notifications::status_toast::StatusToast;
-use platform_title_bar::{SidebarWindowControls, TitleBarSettings, apply_title_bar_insets};
+
 use project::{AgentId, AgentRegistryStore, Event as ProjectEvent, WorktreeId};
 use recent_projects::sidebar_recent_projects::SidebarRecentProjects;
 use remote::RemoteConnectionOptions;
-use ui::utils::platform_title_bar_height;
 
 use serde::{Deserialize, Serialize};
 use settings::{Settings as _, SettingsStore};
@@ -53,9 +52,9 @@ use std::mem;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use theme::{ActiveTheme, CLIENT_SIDE_DECORATION_ROUNDING};
+use theme::ActiveTheme;
 use ui::{
-    AgentThreadStatus, CommonAnimationExt, ContextMenu, ContextMenuEntry, Divider, GradientFade,
+    AgentThreadStatus, CommonAnimationExt, ContextMenu, ContextMenuEntry, GradientFade,
     HighlightedLabel, KeyBinding, PopoverMenu, PopoverMenuHandle, ProjectEmptyState, ScrollAxes,
     Scrollbars, Tab, ThreadItem, ThreadItemWorktreeInfo, TintColor, Tooltip, WithScrollbar,
     prelude::*, render_modifiers, right_click_menu,
@@ -65,10 +64,10 @@ use util::ResultExt as _;
 use util::path_list::PathList;
 use util::paths::PathExt as _;
 use workspace::{
-    CloseWindow, FocusWorkspaceSidebar, MoveProjectDown, MoveProjectUp, MultiWorkspace,
-    MultiWorkspaceEvent, NextProject, NextThread, Open, OpenMode, PreviousProject, PreviousThread,
-    ProjectGroupKey, RemovalIntent, SaveIntent, Sidebar as WorkspaceSidebar, SidebarSide, Toast,
-    ToggleWorkspaceSidebar, Workspace, notifications::NotificationId, sidebar_side_context_menu,
+    FocusWorkspaceSidebar, MoveProjectDown, MoveProjectUp, MultiWorkspace, MultiWorkspaceEvent,
+    NextProject, NextThread, Open, OpenMode, PreviousProject, PreviousThread, ProjectGroupKey,
+    RemovalIntent, SaveIntent, Sidebar as WorkspaceSidebar, SidebarSide, Toast,
+    ToggleWorkspaceSidebar, Workspace, notifications::NotificationId,
 };
 
 use git_ui_core::worktree_labels::workspace_menu_worktree_labels;
@@ -7488,7 +7487,7 @@ impl Sidebar {
             KeyBinding::for_action(&workspace::Open::default(), cx),
         )
         .on_open_project(|_, window, cx| {
-            let side = match AgentSettings::get_global(cx).sidebar_side() {
+            let side = match AgentSettings::get_global(cx).threads_sidebar_side() {
                 SidebarSide::Left => "left",
                 SidebarSide::Right => "right",
             };
@@ -7513,56 +7512,14 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let has_query = self.has_filter_query(cx);
-        let SidebarWindowControls {
-            traffic_lights,
-            left: left_window_controls,
-            right: right_window_controls,
-        } = SidebarWindowControls::new(self.side(cx), window, cx);
-        let title_bar_visible = TitleBarSettings::is_title_bar_visible(window, cx);
-        let header_height = if title_bar_visible {
-            platform_title_bar_height(window)
-        } else {
-            Tab::container_height(cx)
-        };
-
         h_flex()
             .debug_selector(|| "sidebar-header".into())
-            .h(header_height)
-            .map(|header| {
-                if !title_bar_visible {
-                    return header.mt_px();
-                }
-                match window.window_decorations() {
-                    // Without projects there's no bottom border to match the title bar's.
-                    Decorations::Client { .. } => apply_title_bar_insets(
-                        header,
-                        left_window_controls,
-                        right_window_controls,
-                        no_open_projects,
-                    ),
-                    Decorations::Server => header.mt_px().pb_px(),
-                }
-            })
-            .when(left_window_controls, |this| {
-                this.children(Self::render_left_window_controls(window, cx))
-            })
-            .map(|this| {
-                if traffic_lights {
-                    this.pl(px(ui::utils::TRAFFIC_LIGHT_PADDING))
-                } else if !left_window_controls {
-                    this.pl_1p5()
-                } else {
-                    this
-                }
-            })
-            .when(!right_window_controls, |this| this.pr_1p5())
+            .h(Tab::container_height(cx))
+            .px_1p5()
             .gap_1()
             .when(!no_open_projects, |this| {
                 this.border_b_1()
                     .border_color(cx.theme().colors().border)
-                    .when(traffic_lights, |this| {
-                        this.child(Divider::vertical().color(ui::DividerColor::Border))
-                    })
                     .child(
                         div()
                             .debug_selector(|| "sidebar-header-search".into())
@@ -7595,82 +7552,43 @@ impl Sidebar {
                             }),
                     )
             })
-            .when(right_window_controls, |this| {
-                this
-                    // Without projects, nothing flex-grows to push right-side window controls
-                    // to the edge.
-                    .when(no_open_projects, |this| this.justify_end())
-                    .children(Self::render_right_window_controls(window, cx))
-            })
     }
 
-    fn render_left_window_controls(window: &Window, cx: &mut App) -> Option<AnyElement> {
-        platform_title_bar::render_left_window_controls(
-            cx.button_layout(),
-            Box::new(CloseWindow),
-            window,
-        )
-    }
-
-    fn render_right_window_controls(window: &Window, cx: &mut App) -> Option<AnyElement> {
-        platform_title_bar::render_right_window_controls(
-            cx.button_layout(),
-            Box::new(CloseWindow),
-            window,
-        )
-    }
-
-    fn render_sidebar_toggle_button(&self, _cx: &mut Context<Self>) -> impl IntoElement {
-        let on_right = AgentSettings::get_global(_cx).sidebar_side() == SidebarSide::Right;
-
-        sidebar_side_context_menu("sidebar-toggle-menu", _cx)
-            .anchor(if on_right {
-                gpui::Anchor::BottomRight
-            } else {
-                gpui::Anchor::BottomLeft
-            })
-            .attach(if on_right {
-                gpui::Anchor::TopRight
-            } else {
-                gpui::Anchor::TopLeft
-            })
-            .trigger(move |_is_active, _window, _cx| {
-                let icon = if on_right {
-                    IconName::ThreadsSidebarRightOpen
-                } else {
-                    IconName::ThreadsSidebarLeftOpen
-                };
-                IconButton::new("sidebar-close-toggle", icon)
-                    .icon_size(IconSize::Small)
-                    .tooltip(Tooltip::element(move |_window, cx| {
-                        v_flex()
-                            .gap_1()
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .justify_between()
-                                    .child(Label::new("Toggle Sidebar"))
-                                    .child(KeyBinding::for_action(&ToggleWorkspaceSidebar, cx)),
-                            )
-                            .child(
-                                h_flex()
-                                    .pt_1()
-                                    .gap_2()
-                                    .border_t_1()
-                                    .border_color(cx.theme().colors().border_variant)
-                                    .justify_between()
-                                    .child(Label::new("Focus Sidebar"))
-                                    .child(KeyBinding::for_action(&FocusWorkspaceSidebar, cx)),
-                            )
-                            .into_any_element()
-                    }))
-                    .on_click(|_, window, cx| {
-                        if let Some(multi_workspace) = window.root::<MultiWorkspace>().flatten() {
-                            multi_workspace.update(cx, |multi_workspace, cx| {
-                                multi_workspace.close_sidebar(window, cx);
-                            });
-                        }
-                    })
+    fn render_sidebar_toggle_button(&self, cx: &App) -> impl IntoElement {
+        let icon = match self.side(cx) {
+            SidebarSide::Left => IconName::ThreadsSidebarLeftOpen,
+            SidebarSide::Right => IconName::ThreadsSidebarRightOpen,
+        };
+        IconButton::new("sidebar-close-toggle", icon)
+            .icon_size(IconSize::Small)
+            .tooltip(Tooltip::element(|_window, cx| {
+                v_flex()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .justify_between()
+                            .child(Label::new("Toggle Sidebar"))
+                            .child(KeyBinding::for_action(&ToggleWorkspaceSidebar, cx)),
+                    )
+                    .child(
+                        h_flex()
+                            .pt_1()
+                            .gap_2()
+                            .border_t_1()
+                            .border_color(cx.theme().colors().border_variant)
+                            .justify_between()
+                            .child(Label::new("Focus Sidebar"))
+                            .child(KeyBinding::for_action(&FocusWorkspaceSidebar, cx)),
+                    )
+                    .into_any_element()
+            }))
+            .on_click(|_, window, cx| {
+                if let Some(multi_workspace) = window.root::<MultiWorkspace>().flatten() {
+                    multi_workspace.update(cx, |multi_workspace, cx| {
+                        multi_workspace.close_sidebar(window, cx);
+                    });
+                }
             })
     }
 
@@ -8078,7 +7996,7 @@ impl WorkspaceSidebar for Sidebar {
     }
 
     fn side(&self, cx: &App) -> SidebarSide {
-        AgentSettings::get_global(cx).sidebar_side()
+        AgentSettings::get_global(cx).threads_sidebar_side()
     }
 
     fn prepare_for_focus(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -8150,7 +8068,6 @@ impl Focusable for Sidebar {
 
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let _titlebar_height = ui::utils::platform_title_bar_height(window);
         let ui_font = theme_settings::setup_ui_font(window, cx);
         let sticky_header = self.render_sticky_header(window, cx);
 
@@ -8192,52 +8109,8 @@ impl Render for Sidebar {
                 this.recent_projects_popover_handle.toggle(window, cx);
             }))
             .font(ui_font)
-            .map(|el| {
-                let on_left = self.side(cx) == SidebarSide::Left;
-                match window.window_decorations() {
-                    Decorations::Server => el.h_full().w(self.width),
-                    // With client-side decorations the sidebar owns the window
-                    // corners on its side, so round them like the title bar and
-                    // status bar do. The sidebar is stretched 1px outwards over
-                    // the window border on untiled edges (with compensating
-                    // padding) so its rounded background lines up exactly with
-                    // the window shape, avoiding a transparent gap in the
-                    // rounded corners.
-                    Decorations::Client { tiling, .. } => el
-                        .absolute()
-                        .top(if tiling.top { px(0.) } else { px(-1.) })
-                        .bottom(if tiling.bottom { px(0.) } else { px(-1.) })
-                        .when(!tiling.top, |el| el.pt_px())
-                        .when(!tiling.bottom, |el| el.pb_px())
-                        .map(|el| {
-                            if on_left {
-                                el.right(px(0.))
-                                    .left(if tiling.left { px(0.) } else { px(-1.) })
-                                    .when(!tiling.left, |el| el.pl(px(1.)))
-                            } else {
-                                el.left(px(0.))
-                                    .right(if tiling.right { px(0.) } else { px(-1.) })
-                                    .when(!tiling.right, |el| el.pr(px(1.)))
-                            }
-                        })
-                        .when(on_left && !(tiling.top || tiling.left), |el| {
-                            el.rounded_tl(CLIENT_SIDE_DECORATION_ROUNDING)
-                        })
-                        .when(on_left && !(tiling.bottom || tiling.left), |el| {
-                            el.rounded_bl(CLIENT_SIDE_DECORATION_ROUNDING)
-                        })
-                        .when(!on_left && !(tiling.top || tiling.right), |el| {
-                            el.rounded_tr(CLIENT_SIDE_DECORATION_ROUNDING)
-                        })
-                        .when(!on_left && !(tiling.bottom || tiling.right), |el| {
-                            el.rounded_br(CLIENT_SIDE_DECORATION_ROUNDING)
-                        }),
-                }
-            })
+            .size_full()
             .bg(bg)
-            .when(self.side(cx) == SidebarSide::Left, |el| el.border_r_1())
-            .when(self.side(cx) == SidebarSide::Right, |el| el.border_l_1())
-            .border_color(color.border)
             .map(|this| match &self.view {
                 SidebarView::ThreadList => this
                     .child(self.render_sidebar_header(no_open_projects, window, cx))

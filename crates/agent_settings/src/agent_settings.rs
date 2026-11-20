@@ -283,6 +283,13 @@ impl AgentSettings {
         return None;
     }
 
+    pub fn threads_sidebar_side(&self) -> SidebarSide {
+        match self.dock {
+            DockPosition::Left => SidebarSide::Left,
+            _ => SidebarSide::Right,
+        }
+    }
+
     pub fn sidebar_side(&self) -> SidebarSide {
         match self.threads_sidebar.position {
             SidebarDockPosition::Left => SidebarSide::Left,
