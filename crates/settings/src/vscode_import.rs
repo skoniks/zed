@@ -1042,6 +1042,8 @@ impl VsCodeSettings {
             mermaid_font_family: None,
             theme: None,
             icon_theme: None,
+            file_icon_theme: None,
+            folder_icon_theme: None,
             ui_density: None,
             unnecessary_code_fade: None,
             experimental_theme_overrides: None,

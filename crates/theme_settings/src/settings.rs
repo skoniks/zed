@@ -94,8 +94,12 @@ pub struct ThemeSettings {
     pub experimental_theme_overrides: Option<settings::ThemeStyleContent>,
     /// Manual overrides per theme
     pub theme_overrides: HashMap<String, settings::ThemeStyleContent>,
-    /// The current icon theme selection.
+    /// The shared icon theme selection.
     pub icon_theme: IconThemeSelection,
+    /// An optional override for file icons.
+    pub file_icon_theme: Option<IconThemeSelection>,
+    /// An optional override for folder icons and chevrons.
+    pub folder_icon_theme: Option<IconThemeSelection>,
     /// The density of the UI.
     /// Note: This setting is still experimental. See [this tracking issue](
     pub ui_density: UiDensity,
@@ -292,13 +296,13 @@ pub fn set_theme(
     }
 }
 
-/// Sets the icon theme for the given appearance to the icon theme with the specified name.
+/// Sets an icon theme selection for the given appearance to the specified name.
 pub fn set_icon_theme(
-    current: &mut SettingsContent,
+    selection: &mut Option<settings::IconThemeSelection>,
     icon_theme_name: IconThemeName,
     appearance: Appearance,
 ) {
-    if let Some(selection) = current.theme.icon_theme.as_mut() {
+    if let Some(selection) = selection.as_mut() {
         let icon_theme_to_update = match selection {
             settings::IconThemeSelection::Static(theme) => theme,
             settings::IconThemeSelection::Dynamic { mode, light, dark } => match mode {
@@ -313,7 +317,7 @@ pub fn set_icon_theme(
 
         *icon_theme_to_update = icon_theme_name;
     } else {
-        current.theme.icon_theme = Some(settings::IconThemeSelection::Static(icon_theme_name));
+        *selection = Some(settings::IconThemeSelection::Static(icon_theme_name));
     }
 }
 
@@ -375,6 +379,21 @@ pub fn buffer_line_height_from_settings(value: settings::BufferLineHeight) -> Bu
 }
 
 impl ThemeSettings {
+    /// Returns the shared, file override, and folder override theme names for this appearance.
+    pub fn icon_theme_names(
+        &self,
+        appearance: Appearance,
+    ) -> (IconThemeName, Option<IconThemeName>, Option<IconThemeName>) {
+        (
+            self.icon_theme.name(appearance),
+            self.file_icon_theme
+                .as_ref()
+                .map(|theme| theme.name(appearance)),
+            self.folder_icon_theme
+                .as_ref()
+                .map(|theme| theme.name(appearance)),
+        )
+    }
     /// Returns the buffer font size.
     pub fn buffer_font_size(&self, cx: &App) -> Pixels {
         let font_size = cx
@@ -786,6 +805,8 @@ impl settings::Settings for ThemeSettings {
             experimental_theme_overrides: content.experimental_theme_overrides.clone(),
             theme_overrides: content.theme_overrides.clone(),
             icon_theme: icon_theme_selection,
+            file_icon_theme: content.file_icon_theme.clone().map(Into::into),
+            folder_icon_theme: content.folder_icon_theme.clone().map(Into::into),
             ui_density: ui_density_from_settings(content.ui_density.unwrap_or_default()),
             unnecessary_code_fade: content.unnecessary_code_fade.unwrap().0.clamp(0.0, 0.9),
         }

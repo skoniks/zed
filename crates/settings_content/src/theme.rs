@@ -219,8 +219,12 @@ pub struct ThemeSettingsContent {
     pub mermaid_font_family: Option<FontFamilyName>,
     /// The name of the Zed theme to use.
     pub theme: Option<ThemeSelection>,
-    /// The name of the icon theme to use.
+    /// The icon theme to use for files and folders without an override.
     pub icon_theme: Option<IconThemeSelection>,
+    /// The icon theme to use for files. Falls back to `icon_theme` when unset or unavailable.
+    pub file_icon_theme: Option<IconThemeSelection>,
+    /// The icon theme to use for folders and their chevrons. Falls back to `icon_theme` when unset or unavailable.
+    pub folder_icon_theme: Option<IconThemeSelection>,
 
     /// UNSTABLE: Expect many elements to be broken.
     ///

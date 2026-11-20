@@ -141,7 +141,7 @@ pub fn init(themes_to_load: LoadThemes, cx: &mut App) {
             .unwrap()
     });
     let icon_theme = themes.default_icon_theme().unwrap();
-    cx.set_global(GlobalTheme { theme, icon_theme });
+    cx.set_global(GlobalTheme::new(theme, icon_theme));
 }
 
 /// Implementing this trait allows accessing the active theme.
@@ -321,14 +321,19 @@ pub fn deserialize_icon_theme(bytes: &[u8]) -> anyhow::Result<IconThemeFamilyCon
 /// The active theme.
 pub struct GlobalTheme {
     theme: Arc<Theme>,
-    icon_theme: Arc<IconTheme>,
+    file_icon_theme: Arc<IconTheme>,
+    folder_icon_theme: Arc<IconTheme>,
 }
 impl Global for GlobalTheme {}
 
 impl GlobalTheme {
     /// Creates a new [`GlobalTheme`] with the given theme and icon theme.
     pub fn new(theme: Arc<Theme>, icon_theme: Arc<IconTheme>) -> Self {
-        Self { theme, icon_theme }
+        Self {
+            theme,
+            file_icon_theme: icon_theme.clone(),
+            folder_icon_theme: icon_theme,
+        }
     }
 
     /// Updates the active theme.
@@ -336,9 +341,16 @@ impl GlobalTheme {
         cx.update_global::<Self, _>(|this, _| this.theme = theme);
     }
 
-    /// Updates the active icon theme.
-    pub fn update_icon_theme(cx: &mut App, icon_theme: Arc<IconTheme>) {
-        cx.update_global::<Self, _>(|this, _| this.icon_theme = icon_theme);
+    /// Updates the active file and folder icon themes together.
+    pub fn update_icon_themes(
+        cx: &mut App,
+        file_icon_theme: Arc<IconTheme>,
+        folder_icon_theme: Arc<IconTheme>,
+    ) {
+        cx.update_global::<Self, _>(|this, _| {
+            this.file_icon_theme = file_icon_theme;
+            this.folder_icon_theme = folder_icon_theme;
+        });
     }
 
     /// Returns the active theme.
@@ -346,8 +358,13 @@ impl GlobalTheme {
         &cx.global::<Self>().theme
     }
 
-    /// Returns the active icon theme.
-    pub fn icon_theme(cx: &App) -> &Arc<IconTheme> {
-        &cx.global::<Self>().icon_theme
+    /// Returns the active file icon theme.
+    pub fn file_icon_theme(cx: &App) -> &Arc<IconTheme> {
+        &cx.global::<Self>().file_icon_theme
+    }
+
+    /// Returns the active folder icon theme.
+    pub fn folder_icon_theme(cx: &App) -> &Arc<IconTheme> {
+        &cx.global::<Self>().folder_icon_theme
     }
 }

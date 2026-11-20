@@ -479,6 +479,16 @@ pub mod icon_theme_selector {
         /// A list of icon theme names to filter the theme selector down to.
         pub themes_filter: Option<Vec<String>>,
     }
+
+    gpui::actions!(
+        icon_theme_selector,
+        [
+            /// Opens the icon theme selector for files only.
+            SelectFileIconTheme,
+            /// Opens the icon theme selector for folders and their chevrons only.
+            SelectFolderIconTheme,
+        ]
+    );
 }
 
 pub mod search {

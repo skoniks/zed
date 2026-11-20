@@ -2785,7 +2785,7 @@ fn open_settings_file(
     .detach_and_log_err(cx);
 }
 
-/// Eagerly loads the active theme and icon theme based on the selections in the
+/// Eagerly loads the active UI and icon themes based on the selections in the
 /// theme settings.
 ///
 /// This fast path exists to load these themes as soon as possible so the user
@@ -2802,48 +2802,37 @@ pub(crate) fn eager_load_active_theme_and_icon_theme(fs: Arc<dyn Fs>, cx: &mut A
     }
 
     let theme_name = theme_settings.theme.name(appearance);
-    let icon_theme_name = theme_settings.icon_theme.name(appearance);
-    let themes_to_load = [
-        theme_registry
-            .get(&theme_name.0)
-            .is_err()
-            .then(|| {
-                extension_store
-                    .read(cx)
-                    .path_to_extension_theme(&theme_name.0)
-            })
-            .flatten()
-            .map(LoadTarget::Theme),
-        theme_registry
-            .get_icon_theme(&icon_theme_name.0)
-            .is_err()
-            .then(|| {
-                extension_store
-                    .read(cx)
-                    .path_to_extension_icon_theme(&icon_theme_name.0)
-            })
-            .flatten()
-            .map(LoadTarget::IconTheme),
-    ];
-
-    enum ReloadTarget {
-        Theme,
-        IconTheme,
+    let extensions = extension_store.read(cx);
+    let mut themes_to_load = Vec::new();
+    if theme_registry.get(&theme_name.0).is_err()
+        && let Some(path) = extensions.path_to_extension_theme(&theme_name.0)
+    {
+        themes_to_load.push(LoadTarget::Theme(path));
     }
 
+    let (shared, file, folder) = theme_settings.icon_theme_names(appearance);
+    let mut icon_theme_paths = Vec::new();
+    for name in [Some(shared), file, folder].into_iter().flatten() {
+        if theme_registry.get_icon_theme(&name.0).is_err()
+            && let Some(paths) = extensions.path_to_extension_icon_theme(&name.0)
+            && !icon_theme_paths.contains(&paths)
+        {
+            icon_theme_paths.push(paths);
+        }
+    }
+    themes_to_load.extend(icon_theme_paths.into_iter().map(LoadTarget::IconTheme));
+
     let executor = cx.background_executor();
-    let reload_tasks = parking_lot::Mutex::new(Vec::with_capacity(themes_to_load.len()));
+    let reloaded = parking_lot::Mutex::new((false, false));
 
-    let mut themes_to_load = themes_to_load.into_iter().flatten().peekable();
-
-    if themes_to_load.peek().is_none() {
+    if themes_to_load.is_empty() {
         return;
     }
 
     cx.foreground_executor().block_on(executor.scoped(|scope| {
         for load_target in themes_to_load {
             let theme_registry = &theme_registry;
-            let reload_tasks = &reload_tasks;
+            let reloaded = &reloaded;
             let fs = fs.clone();
 
             scope.spawn(async move {
@@ -2856,7 +2845,7 @@ pub(crate) fn eager_load_active_theme_and_icon_theme(fs: Arc<dyn Fs>, cx: &mut A
                             .log_err()
                             && load_user_theme(theme_registry, &bytes).log_err().is_some()
                         {
-                            reload_tasks.lock().push(ReloadTarget::Theme);
+                            reloaded.lock().0 = true;
                         }
                     }
                     LoadTarget::IconTheme((icon_theme_path, icons_root_path)) => {
@@ -2870,7 +2859,7 @@ pub(crate) fn eager_load_active_theme_and_icon_theme(fs: Arc<dyn Fs>, cx: &mut A
                                 .log_err()
                                 .is_some()
                         {
-                            reload_tasks.lock().push(ReloadTarget::IconTheme);
+                            reloaded.lock().1 = true;
                         }
                     }
                 }
@@ -2878,11 +2867,12 @@ pub(crate) fn eager_load_active_theme_and_icon_theme(fs: Arc<dyn Fs>, cx: &mut A
         }
     }));
 
-    for reload_target in reload_tasks.into_inner() {
-        match reload_target {
-            ReloadTarget::Theme => theme_settings::reload_theme(cx),
-            ReloadTarget::IconTheme => theme_settings::reload_icon_theme(cx),
-        };
+    let (reloaded_theme, reloaded_icon_themes) = reloaded.into_inner();
+    if reloaded_theme {
+        theme_settings::reload_theme(cx);
+    }
+    if reloaded_icon_themes {
+        theme_settings::reload_icon_theme(cx);
     }
 }
 

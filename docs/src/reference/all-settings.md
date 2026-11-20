@@ -3727,6 +3727,13 @@ Inherited patterns are inserted at `"..."`, and duplicates keep their first occu
 - Setting: `icon_theme`
 - Default: `Zed (Default)`
 
+### File and Folder Icon Themes
+
+- Settings: `file_icon_theme`, `folder_icon_theme`
+- Default: unset (use `icon_theme`)
+
+Each setting accepts the same theme name or object as `icon_theme`. The folder theme also supplies chevrons. If an override is unset or its theme isn't installed, Zed uses `icon_theme` for that category.
+
 ### Icon Theme Object
 
 - Description: Specify the icon theme using an object that includes the `mode`, `dark`, and `light`.

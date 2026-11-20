@@ -15,10 +15,10 @@ use anyhow::{Context as _, Result};
 use gpui::{App, Font, HighlightStyle, Pixels, Refineable, ScrollDelta, px};
 use gpui_util::ResultExt;
 use theme::{
-    AccentColors, Appearance, AppearanceContent, DEFAULT_DARK_THEME, DEFAULT_ICON_THEME_NAME,
-    GlobalTheme, LoadThemes, PlayerColor, PlayerColors, StatusColors, SyntaxTheme,
-    SystemAppearance, SystemColors, Theme, ThemeColors, ThemeFamily, ThemeRegistry,
-    ThemeSettingsProvider, ThemeStyles, default_color_scales, try_parse_color,
+    AccentColors, Appearance, AppearanceContent, DEFAULT_DARK_THEME, GlobalTheme, IconTheme,
+    LoadThemes, PlayerColor, PlayerColors, StatusColors, SyntaxTheme, SystemAppearance,
+    SystemColors, Theme, ThemeColors, ThemeFamily, ThemeRegistry, ThemeSettingsProvider,
+    ThemeStyles, default_color_scales, try_parse_color,
 };
 
 pub use crate::schema::{
@@ -80,9 +80,9 @@ pub fn init(themes_to_load: LoadThemes, cx: &mut App) {
     }
 
     let theme = configured_theme(cx);
-    let icon_theme = configured_icon_theme(cx);
+    let (file_icon_theme, folder_icon_theme) = configured_icon_themes(cx);
     GlobalTheme::update_theme(cx, theme);
-    GlobalTheme::update_icon_theme(cx, icon_theme);
+    GlobalTheme::update_icon_themes(cx, file_icon_theme, folder_icon_theme);
 
     let settings = ThemeSettings::get_global(cx);
 
@@ -95,7 +95,7 @@ pub fn init(themes_to_load: LoadThemes, cx: &mut App) {
     let mut prev_markdown_preview_font_size_settings =
         settings.markdown_preview_font_size_settings();
     let mut prev_theme_name = settings.theme.name(SystemAppearance::global(cx).0);
-    let mut prev_icon_theme_name = settings.icon_theme.name(SystemAppearance::global(cx).0);
+    let mut prev_icon_theme_names = settings.icon_theme_names(SystemAppearance::global(cx).0);
     let mut prev_theme_overrides = (
         settings.experimental_theme_overrides.clone(),
         settings.theme_overrides.clone(),
@@ -111,7 +111,7 @@ pub fn init(themes_to_load: LoadThemes, cx: &mut App) {
         let git_commit_buffer_font_size_settings = settings.git_commit_buffer_font_size_settings();
         let markdown_preview_font_size_settings = settings.markdown_preview_font_size_settings();
         let theme_name = settings.theme.name(SystemAppearance::global(cx).0);
-        let icon_theme_name = settings.icon_theme.name(SystemAppearance::global(cx).0);
+        let icon_theme_names = settings.icon_theme_names(SystemAppearance::global(cx).0);
         let theme_overrides = (
             settings.experimental_theme_overrides.clone(),
             settings.theme_overrides.clone(),
@@ -153,8 +153,8 @@ pub fn init(themes_to_load: LoadThemes, cx: &mut App) {
             reload_theme(cx);
         }
 
-        if icon_theme_name != prev_icon_theme_name {
-            prev_icon_theme_name = icon_theme_name;
+        if icon_theme_names != prev_icon_theme_names {
+            prev_icon_theme_names = icon_theme_names;
             reload_icon_theme(cx);
         }
     })
@@ -182,22 +182,33 @@ fn configured_theme(cx: &mut App) -> Arc<Theme> {
     theme_settings.apply_theme_overrides(theme)
 }
 
-fn configured_icon_theme(cx: &mut App) -> Arc<theme::IconTheme> {
+fn configured_icon_themes(cx: &mut App) -> (Arc<IconTheme>, Arc<IconTheme>) {
     let themes = ThemeRegistry::default_global(cx);
-    let theme_settings = ThemeSettings::get_global(cx);
-    let system_appearance = SystemAppearance::global(cx);
+    let (shared_name, file_name, folder_name) =
+        ThemeSettings::get_global(cx).icon_theme_names(SystemAppearance::global(cx).0);
 
-    let icon_theme_name = theme_settings.icon_theme.name(*system_appearance);
-
-    match themes.get_icon_theme(&icon_theme_name.0) {
-        Ok(theme) => theme,
+    let get_theme = |name: &IconThemeName| match themes.get_icon_theme(&name.0) {
+        Ok(theme) => Some(theme),
         Err(err) => {
             if themes.extensions_loaded() {
                 log::error!("{err}");
             }
-            themes.get_icon_theme(DEFAULT_ICON_THEME_NAME).unwrap()
+            None
         }
-    }
+    };
+    let shared_theme = get_theme(&shared_name).unwrap_or_else(theme::default_icon_theme);
+    let resolve_override = |name: Option<&IconThemeName>| {
+        name.filter(|name| *name != &shared_name)
+            .and_then(get_theme)
+            .unwrap_or_else(|| shared_theme.clone())
+    };
+    let file_theme = resolve_override(file_name.as_ref());
+    let folder_theme = if folder_name == file_name {
+        file_theme.clone()
+    } else {
+        resolve_override(folder_name.as_ref())
+    };
+    (file_theme, folder_theme)
 }
 
 /// Reloads the current theme from settings.
@@ -207,11 +218,86 @@ pub fn reload_theme(cx: &mut App) {
     cx.refresh_windows();
 }
 
-/// Reloads the current icon theme from settings.
+/// Reloads the current file and folder icon themes from settings.
 pub fn reload_icon_theme(cx: &mut App) {
-    let icon_theme = configured_icon_theme(cx);
-    GlobalTheme::update_icon_theme(cx, icon_theme);
+    let (file_icon_theme, folder_icon_theme) = configured_icon_themes(cx);
+    GlobalTheme::update_icon_themes(cx, file_icon_theme, folder_icon_theme);
     cx.refresh_windows();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, UpdateGlobal};
+    use std::path::Path;
+    use theme::DEFAULT_ICON_THEME_NAME;
+
+    #[gpui::test]
+    fn test_icon_theme_overrides(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            ::settings::init(cx);
+            init(LoadThemes::JustBase, cx);
+            ThemeRegistry::global(cx)
+                .load_icon_theme(
+                    Path::new("test.json"),
+                    Path::new(""),
+                    br#"{
+                        "name": "Test Icons",
+                        "author": "Test",
+                        "themes": [
+                            {"name": "Test Icons A", "appearance": "light"},
+                            {"name": "Test Icons B", "appearance": "dark"}
+                        ]
+                    }"#
+                    .to_vec(),
+                )
+                .unwrap();
+        });
+
+        let cases = [
+            (
+                r#"{"icon_theme": "Test Icons A"}"#,
+                "Test Icons A",
+                "Test Icons A",
+            ),
+            (
+                r#"{"icon_theme": "Test Icons A", "folder_icon_theme": "Zed (Default)"}"#,
+                "Test Icons A",
+                DEFAULT_ICON_THEME_NAME,
+            ),
+            (
+                r#"{
+                    "file_icon_theme": {"mode": "dark", "light": "Test Icons A", "dark": "Test Icons B"},
+                    "folder_icon_theme": "Test Icons A"
+                }"#,
+                "Test Icons B",
+                "Test Icons A",
+            ),
+            (
+                r#"{"icon_theme": "Test Icons A", "file_icon_theme": "Unavailable"}"#,
+                "Test Icons A",
+                "Test Icons A",
+            ),
+            (r#"{}"#, DEFAULT_ICON_THEME_NAME, DEFAULT_ICON_THEME_NAME),
+        ];
+        for (settings, expected_file, expected_folder) in cases {
+            cx.update(|cx| {
+                SettingsStore::update_global(cx, |store, cx| {
+                    store.set_user_settings(settings, cx).unwrap();
+                });
+            });
+            cx.update(|cx| {
+                assert_eq!(
+                    GlobalTheme::file_icon_theme(cx).name.as_ref(),
+                    expected_file
+                );
+                assert_eq!(
+                    GlobalTheme::folder_icon_theme(cx).name.as_ref(),
+                    expected_folder
+                );
+            });
+        }
+    }
 }
 
 /// Loads the themes bundled with the Zed binary into the registry.
