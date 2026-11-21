@@ -144,6 +144,7 @@ pub struct ThreadsArchiveView {
     hovered_index: Option<usize>,
     preserve_selection_on_next_update: bool,
     filter_editor: Entity<Editor>,
+    header_actions: Box<dyn Fn(&App) -> AnyElement>,
     _subscriptions: Vec<gpui::Subscription>,
     _refresh_history_task: Task<()>,
     workspace: WeakEntity<Workspace>,
@@ -161,6 +162,7 @@ impl ThreadsArchiveView {
         workspace: WeakEntity<Workspace>,
         agent_connection_store: WeakEntity<AgentConnectionStore>,
         agent_server_store: WeakEntity<AgentServerStore>,
+        header_actions: impl Fn(&App) -> AnyElement + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -215,6 +217,7 @@ impl ThreadsArchiveView {
             hovered_index: None,
             preserve_selection_on_next_update: false,
             filter_editor,
+            header_actions: Box::new(header_actions),
             _subscriptions: vec![
                 filter_editor_subscription,
                 thread_metadata_store_subscription,
@@ -873,7 +876,7 @@ impl ThreadsArchiveView {
                     .debug_selector(|| "threads-archive-header-search".into())
                     .ml_1()
                     .min_w_0()
-                    .w_full()
+                    .flex_1()
                     .gap_1()
                     .child(
                         Icon::new(IconName::MagnifyingGlass)
@@ -896,6 +899,7 @@ impl ThreadsArchiveView {
                         })),
                 )
             })
+            .child((self.header_actions)(cx))
     }
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {

@@ -31,6 +31,7 @@ use std::{
 };
 use util::{path_list::PathList, rel_path::rel_path};
 use workspace::{
+    FocusWorkspaceSidebar,
     dock::{Panel, PanelSizeState},
     item::test::TestItem,
 };
@@ -2698,12 +2699,23 @@ async fn test_threads_headers_align_with_editor_tabs(cx: &mut TestAppContext) {
     });
     let window_handle = cx.update(|window, _| window.window_handle());
 
+    let recent_projects_popover = sidebar.read_with(cx, |sidebar, _| {
+        sidebar.recent_projects_popover_handle.clone()
+    });
     for (header_selector, search_selector) in [
         ("sidebar-header", "sidebar-header-search"),
         ("threads-archive-header", "threads-archive-header-search"),
     ] {
         if header_selector == "threads-archive-header" {
-            sidebar.update_in(cx, |sidebar, window, cx| sidebar.show_archive(window, cx));
+            let history_button = cx
+                .debug_bounds("sidebar-history-button")
+                .expect("History button is rendered in the Threads header");
+            cx.simulate_click(history_button.center(), Modifiers::none());
+            cx.run_until_parked();
+            assert!(sidebar.read_with(cx, |sidebar, _| matches!(
+                sidebar.view,
+                SidebarView::Archive(_)
+            )));
         }
         for ((font_size, density, decorations), scale_factor) in [
             (12., UiDensity::Compact, Decorations::Server),
@@ -2762,11 +2774,16 @@ async fn test_threads_headers_align_with_editor_tabs(cx: &mut TestAppContext) {
                 let search = cx
                     .debug_bounds(search_selector)
                     .expect("search is rendered");
+                let actions = cx
+                    .debug_bounds("sidebar-header-actions")
+                    .expect("History and Add Project are rendered in the header");
                 let layout = format!(
                     "{header_selector}, {visibility:?}, fullscreen: {fullscreen}, {font_size}px, {scale_factor}x"
                 );
                 assert_eq!(header.size.height, tab.size.height, "{layout}");
                 assert_eq!(header.intersect(&search), search, "{layout}");
+                assert_eq!(header.intersect(&actions), actions, "{layout}");
+                assert!(search.right() <= actions.left(), "{layout}");
                 let inset = search.left() - header.left();
                 assert_eq!(
                     inset,
@@ -2775,7 +2792,25 @@ async fn test_threads_headers_align_with_editor_tabs(cx: &mut TestAppContext) {
                 );
             }
         }
+        let add_project_button = cx
+            .debug_bounds("sidebar-add-project-button")
+            .expect("Add Project button is rendered in the header");
+        cx.simulate_click(add_project_button.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(recent_projects_popover.is_deployed());
+        cx.update(|_, cx| recent_projects_popover.hide(cx));
+        cx.run_until_parked();
     }
+
+    let history_button = cx
+        .debug_bounds("sidebar-history-button")
+        .expect("History button is rendered in the history header");
+    cx.simulate_click(history_button.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(sidebar.read_with(cx, |sidebar, _| matches!(
+        sidebar.view,
+        SidebarView::ThreadList
+    )));
 }
 
 #[gpui::test]

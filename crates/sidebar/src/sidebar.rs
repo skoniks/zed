@@ -64,10 +64,9 @@ use util::ResultExt as _;
 use util::path_list::PathList;
 use util::paths::PathExt as _;
 use workspace::{
-    FocusWorkspaceSidebar, MoveProjectDown, MoveProjectUp, MultiWorkspace, MultiWorkspaceEvent,
-    NextProject, NextThread, Open, OpenMode, PreviousProject, PreviousThread, ProjectGroupKey,
-    RemovalIntent, SaveIntent, Sidebar as WorkspaceSidebar, SidebarSide, Toast,
-    ToggleWorkspaceSidebar, Workspace, notifications::NotificationId,
+    MoveProjectDown, MoveProjectUp, MultiWorkspace, MultiWorkspaceEvent, NextProject, NextThread,
+    Open, OpenMode, PreviousProject, PreviousThread, ProjectGroupKey, RemovalIntent, SaveIntent,
+    Sidebar as WorkspaceSidebar, SidebarSide, Toast, Workspace, notifications::NotificationId,
 };
 
 use git_ui_core::worktree_labels::workspace_menu_worktree_labels;
@@ -6870,7 +6869,7 @@ impl Sidebar {
             .child(self.filter_editor.clone())
     }
 
-    fn render_recent_projects_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_recent_projects_button(&self, cx: &App) -> impl IntoElement {
         let multi_workspace = self.multi_workspace.upgrade();
 
         let workspace = multi_workspace
@@ -6911,9 +6910,9 @@ impl Sidebar {
             )
             .offset(gpui::Point {
                 x: px(-2.0),
-                y: px(-2.0),
+                y: px(2.0),
             })
-            .anchor(gpui::Anchor::BottomRight)
+            .anchor(gpui::Anchor::TopRight)
     }
 
     fn new_thread_in_group(
@@ -7517,110 +7516,86 @@ impl Sidebar {
             .h(Tab::container_height(cx))
             .px_1p5()
             .gap_1()
+            .border_b_1()
+            .border_color(cx.theme().colors().border)
+            .when(no_open_projects, |this| this.justify_end())
             .when(!no_open_projects, |this| {
-                this.border_b_1()
-                    .border_color(cx.theme().colors().border)
-                    .child(
-                        div()
-                            .debug_selector(|| "sidebar-header-search".into())
-                            .ml_1()
-                            .child(
-                                Icon::new(IconName::MagnifyingGlass)
-                                    .size(IconSize::Small)
-                                    .color(Color::Muted),
-                            ),
-                    )
-                    .child(self.render_filter_input(cx))
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .when(
-                                self.selection.is_some()
-                                    && !self.filter_editor.focus_handle(cx).is_focused(window),
-                                |this| this.child(KeyBinding::for_action(&FocusSidebarFilter, cx)),
+                this.child(
+                    div()
+                        .debug_selector(|| "sidebar-header-search".into())
+                        .ml_1()
+                        .child(
+                            Icon::new(IconName::MagnifyingGlass)
+                                .size(IconSize::Small)
+                                .color(Color::Muted),
+                        ),
+                )
+                .child(self.render_filter_input(cx))
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .when(
+                            self.selection.is_some()
+                                && !self.filter_editor.focus_handle(cx).is_focused(window),
+                            |this| this.child(KeyBinding::for_action(&FocusSidebarFilter, cx)),
+                        )
+                        .when(has_query, |this| {
+                            this.child(
+                                IconButton::new("clear_filter", IconName::Close)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text("Clear Search"))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.reset_filter_editor_text(window, cx);
+                                        this.update_entries(cx);
+                                    })),
                             )
-                            .when(has_query, |this| {
-                                this.child(
-                                    IconButton::new("clear_filter", IconName::Close)
-                                        .icon_size(IconSize::Small)
-                                        .tooltip(Tooltip::text("Clear Search"))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.reset_filter_editor_text(window, cx);
-                                            this.update_entries(cx);
-                                        })),
-                                )
-                            }),
-                    )
+                        }),
+                )
             })
+            .child(self.render_sidebar_header_actions(cx.weak_entity(), cx))
     }
 
-    fn render_sidebar_toggle_button(&self, cx: &App) -> impl IntoElement {
-        let icon = match self.side(cx) {
-            SidebarSide::Left => IconName::ThreadsSidebarLeftOpen,
-            SidebarSide::Right => IconName::ThreadsSidebarRightOpen,
-        };
-        IconButton::new("sidebar-close-toggle", icon)
-            .icon_size(IconSize::Small)
-            .tooltip(Tooltip::element(|_window, cx| {
-                v_flex()
-                    .gap_1()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .justify_between()
-                            .child(Label::new("Toggle Sidebar"))
-                            .child(KeyBinding::for_action(&ToggleWorkspaceSidebar, cx)),
-                    )
-                    .child(
-                        h_flex()
-                            .pt_1()
-                            .gap_2()
-                            .border_t_1()
-                            .border_color(cx.theme().colors().border_variant)
-                            .justify_between()
-                            .child(Label::new("Focus Sidebar"))
-                            .child(KeyBinding::for_action(&FocusWorkspaceSidebar, cx)),
-                    )
-                    .into_any_element()
-            }))
-            .on_click(|_, window, cx| {
-                if let Some(multi_workspace) = window.root::<MultiWorkspace>().flatten() {
-                    multi_workspace.update(cx, |multi_workspace, cx| {
-                        multi_workspace.close_sidebar(window, cx);
-                    });
-                }
-            })
-    }
-
-    fn render_sidebar_bottom_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_sidebar_header_actions(
+        &self,
+        sidebar: WeakEntity<Self>,
+        cx: &App,
+    ) -> impl IntoElement {
         let is_archive = matches!(self.view, SidebarView::Archive(..));
-        let on_right = self.side(cx) == SidebarSide::Right;
+        let history_label = if is_archive {
+            "Hide Thread History"
+        } else {
+            "Show Thread History"
+        };
 
         h_flex()
-            .p_1()
+            .debug_selector(|| "sidebar-header-actions".into())
+            .flex_shrink_0()
             .gap_1()
-            .when(on_right, |this| this.flex_row_reverse())
-            .border_t_1()
-            .border_color(cx.theme().colors().border)
-            .child(self.render_sidebar_toggle_button(cx))
             .child(
-                IconButton::new("history", IconName::Clock)
-                    .icon_size(IconSize::Small)
-                    .toggle_state(is_archive)
-                    .tooltip(move |_, cx| {
-                        let label = if is_archive {
-                            "Hide Thread History"
-                        } else {
-                            "Show Thread History"
-                        };
-                        Tooltip::for_action(label, &ToggleThreadHistory, cx)
-                    })
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.toggle_archive(&ToggleThreadHistory, window, cx);
-                    })),
+                div()
+                    .debug_selector(|| "sidebar-history-button".into())
+                    .child(
+                        IconButton::new("history", IconName::Clock)
+                            .icon_size(IconSize::Small)
+                            .aria_label(history_label)
+                            .toggle_state(is_archive)
+                            .tooltip(move |_, cx| {
+                                Tooltip::for_action(history_label, &ToggleThreadHistory, cx)
+                            })
+                            .on_click(move |_, window, cx| {
+                                if let Some(sidebar) = sidebar.upgrade() {
+                                    sidebar.update(cx, |this, cx| {
+                                        this.toggle_archive(&ToggleThreadHistory, window, cx);
+                                    });
+                                }
+                            }),
+                    ),
             )
-            .child(div().flex_1())
-            .child(self.render_recent_projects_button(cx))
+            .child(
+                div()
+                    .debug_selector(|| "sidebar-add-project-button".into())
+                    .child(self.render_recent_projects_button(cx)),
+            )
     }
 
     fn active_workspace(&self, cx: &App) -> Option<Entity<Workspace>> {
@@ -7809,11 +7784,23 @@ impl Sidebar {
 
         let agent_connection_store = agent_panel.read(cx).connection_store().downgrade();
 
+        let sidebar = cx.weak_entity();
         let archive_view = cx.new(|cx| {
             ThreadsArchiveView::new(
                 active_workspace.downgrade(),
                 agent_connection_store.clone(),
                 agent_server_store.clone(),
+                move |cx| {
+                    sidebar.upgrade().map_or_else(
+                        || gpui::Empty.into_any_element(),
+                        |sidebar| {
+                            sidebar
+                                .read(cx)
+                                .render_sidebar_header_actions(sidebar.downgrade(), cx)
+                                .into_any_element()
+                        },
+                    )
+                },
                 window,
                 cx,
             )
@@ -8161,7 +8148,6 @@ impl Render for Sidebar {
                     this.child(self.render_cross_channel_import_onboarding(verbose, cx))
                 })
             })
-            .child(self.render_sidebar_bottom_bar(cx))
     }
 }
 
