@@ -370,6 +370,7 @@ message StashEntry {
   optional string branch = 3;
   uint64 index = 4;
   int64 timestamp = 5;
+  optional bytes base = 6;
 }
 
 message Stage {
@@ -781,6 +782,7 @@ message InitialGraphCommit {
   string sha = 1;
   repeated string parents = 2;
   repeated string ref_names = 3;
+  optional StashEntry stash = 4;
 }
 
 message GetInitialGraphDataResponse {
