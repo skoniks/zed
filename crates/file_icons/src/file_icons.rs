@@ -21,7 +21,7 @@ pub struct FolderIndicators {
 impl FileIcons {
     pub fn get(cx: &App) -> Self {
         Self {
-            icon_theme: GlobalTheme::icon_theme(cx).clone(),
+            icon_theme: GlobalTheme::file_icon_theme(cx).clone(),
         }
     }
 
@@ -107,7 +107,7 @@ impl FileIcons {
                 .map(|icon_definition| icon_definition.path.clone())
         }
 
-        get_icon_for_type(GlobalTheme::icon_theme(cx), typ).or_else(|| {
+        get_icon_for_type(&self.icon_theme, typ).or_else(|| {
             Self::default_icon_theme(cx).and_then(|icon_theme| get_icon_for_type(&icon_theme, typ))
         })
     }
@@ -132,7 +132,7 @@ impl FileIcons {
             }
         }
 
-        get_folder_icon(GlobalTheme::icon_theme(cx), path, expanded)
+        get_folder_icon(GlobalTheme::folder_icon_theme(cx), path, expanded)
             .or_else(|| {
                 Self::default_icon_theme(cx)
                     .and_then(|icon_theme| get_folder_icon(&icon_theme, path, expanded))
@@ -156,7 +156,7 @@ impl FileIcons {
             }
         }
 
-        get_generic_folder_icon(GlobalTheme::icon_theme(cx), expanded).or_else(|| {
+        get_generic_folder_icon(GlobalTheme::folder_icon_theme(cx), expanded).or_else(|| {
             Self::default_icon_theme(cx)
                 .and_then(|icon_theme| get_generic_folder_icon(&icon_theme, expanded))
         })
@@ -171,7 +171,7 @@ impl FileIcons {
             }
         }
 
-        get_chevron_icon(GlobalTheme::icon_theme(cx), expanded).or_else(|| {
+        get_chevron_icon(GlobalTheme::folder_icon_theme(cx), expanded).or_else(|| {
             Self::default_icon_theme(cx)
                 .and_then(|icon_theme| get_chevron_icon(&icon_theme, expanded))
         })
@@ -202,6 +202,70 @@ impl FileIcons {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[gpui::test]
+    fn test_file_and_folder_icons_use_their_own_themes(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            theme::init(theme::LoadThemes::JustBase, cx);
+            let registry = ThemeRegistry::global(cx);
+            registry
+                .load_icon_theme(
+                    Path::new("test.json"),
+                    Path::new("test-icons"),
+                    br#"{
+                        "name": "Test Icons",
+                        "author": "Test",
+                        "themes": [{
+                            "name": "Test Icons",
+                            "appearance": "dark",
+                            "file_icons": {"rust": {"path": "rust.svg"}},
+                            "named_directory_icons": {"src": {"collapsed": "src.svg"}},
+                            "directory_icons": {"collapsed": "folder.svg"},
+                            "chevron_icons": {"collapsed": "chevron.svg"}
+                        }]
+                    }"#
+                    .to_vec(),
+                )
+                .unwrap();
+            let custom = registry.get_icon_theme("Test Icons").unwrap();
+            let default = theme::default_icon_theme();
+            let file = Path::new("main.rs");
+            let folder = Path::new("src");
+            let generic_folder = Path::new("other");
+
+            GlobalTheme::update_icon_themes(cx, custom.clone(), default.clone());
+            assert_eq!(
+                FileIcons::get_icon(file, cx).as_deref(),
+                Some(util::path!("test-icons/rust.svg"))
+            );
+            assert_eq!(
+                FileIcons::get_folder_icon(false, folder, cx).as_deref(),
+                Some("icons/file_icons/folder.svg"),
+            );
+            assert_eq!(
+                FileIcons::get_chevron_icon(false, cx).as_deref(),
+                Some("icons/file_icons/chevron_right.svg"),
+            );
+
+            GlobalTheme::update_icon_themes(cx, default, custom);
+            assert_eq!(
+                FileIcons::get_icon(file, cx).as_deref(),
+                Some("icons/file_icons/rust.svg")
+            );
+            assert_eq!(
+                FileIcons::get_folder_icon(false, folder, cx).as_deref(),
+                Some(util::path!("test-icons/src.svg"))
+            );
+            assert_eq!(
+                FileIcons::get_folder_icon(false, generic_folder, cx).as_deref(),
+                Some(util::path!("test-icons/folder.svg"))
+            );
+            assert_eq!(
+                FileIcons::get_chevron_icon(false, cx).as_deref(),
+                Some(util::path!("test-icons/chevron.svg"))
+            );
+        });
+    }
 
     #[gpui::test]
     fn test_folder_indicators_per_setting(cx: &mut gpui::TestAppContext) {

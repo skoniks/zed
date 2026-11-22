@@ -59,11 +59,38 @@ impl Render for IconThemeSelector {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum IconThemeTarget {
+    Shared,
+    File,
+    Folder,
+}
+
+impl IconThemeTarget {
+    fn selection(self, settings: &ThemeSettings) -> Option<&IconThemeSelection> {
+        match self {
+            Self::Shared => Some(&settings.icon_theme),
+            Self::File => settings.file_icon_theme.as_ref(),
+            Self::Folder => settings.folder_icon_theme.as_ref(),
+        }
+    }
+
+    fn setting_name(self) -> &'static str {
+        match self {
+            Self::Shared => "icon_theme",
+            Self::File => "file_icon_theme",
+            Self::Folder => "folder_icon_theme",
+        }
+    }
+}
+
 pub(crate) struct IconThemeSelectorDelegate {
     fs: Arc<dyn Fs>,
     themes: Vec<ThemeMeta>,
     matches: Vec<StringMatch>,
+    target: IconThemeTarget,
     original_theme: IconThemeName,
+    original_selection: Option<IconThemeSelection>,
     selection_completed: bool,
     selected_theme: Option<IconThemeName>,
     selected_index: usize,
@@ -74,12 +101,14 @@ impl IconThemeSelectorDelegate {
     pub fn new(
         selector: WeakEntity<IconThemeSelector>,
         fs: Arc<dyn Fs>,
+        target: IconThemeTarget,
         themes_filter: Option<&Vec<String>>,
         cx: &mut Context<IconThemeSelector>,
     ) -> Self {
         let theme_settings = ThemeSettings::get_global(cx);
-        let original_theme = theme_settings
-            .icon_theme
+        let original_selection = target.selection(theme_settings);
+        let original_theme = original_selection
+            .unwrap_or(&theme_settings.icon_theme)
             .name(SystemAppearance::global(cx).0);
 
         let registry = ThemeRegistry::global(cx);
@@ -114,14 +143,16 @@ impl IconThemeSelectorDelegate {
             fs,
             themes,
             matches,
-            original_theme: original_theme.clone(),
+            target,
+            original_theme,
+            original_selection: original_selection.cloned(),
             selected_index: 0,
             selected_theme: None,
             selection_completed: false,
             selector,
         };
 
-        this.select_if_matching(&original_theme.0);
+        this.select_if_matching();
         this
     }
 
@@ -131,29 +162,37 @@ impl IconThemeSelectorDelegate {
     ) -> Option<IconThemeName> {
         let mat = self.matches.get(self.selected_index)?;
         let name = IconThemeName(mat.string.clone().into());
-        Self::set_icon_theme(name.clone(), cx);
+        self.preview_selection(Some(IconThemeSelection::Static(name.clone())), cx);
         Some(name)
     }
 
-    fn select_if_matching(&mut self, theme_name: &str) {
+    fn select_if_matching(&mut self) {
         self.selected_index = self
             .matches
             .iter()
-            .position(|mat| mat.string == theme_name)
+            .position(|mat| mat.string == self.original_theme.0.as_ref())
             .unwrap_or(self.selected_index);
     }
 
     fn revert_theme(&mut self, cx: &mut App) {
         if !self.selection_completed {
-            Self::set_icon_theme(self.original_theme.clone(), cx);
+            self.preview_selection(self.original_selection.clone(), cx);
             self.selection_completed = true;
         }
     }
 
-    fn set_icon_theme(name: IconThemeName, cx: &mut App) {
+    fn preview_selection(&self, selection: Option<IconThemeSelection>, cx: &mut App) {
         SettingsStore::update_global(cx, |store, _| {
             let mut theme_settings = store.get::<ThemeSettings>(None).clone();
-            theme_settings.icon_theme = IconThemeSelection::Static(name);
+            match self.target {
+                IconThemeTarget::Shared => {
+                    if let Some(selection) = selection {
+                        theme_settings.icon_theme = selection;
+                    }
+                }
+                IconThemeTarget::File => theme_settings.file_icon_theme = selection,
+                IconThemeTarget::Folder => theme_settings.folder_icon_theme = selection,
+            }
             store.override_global(theme_settings);
         });
     }
@@ -167,7 +206,12 @@ impl PickerDelegate for IconThemeSelectorDelegate {
     }
 
     fn placeholder_text(&self, _window: &mut Window, _cx: &mut App) -> Arc<str> {
-        "Select Icon Theme...".into()
+        match self.target {
+            IconThemeTarget::Shared => "Select Icon Theme...",
+            IconThemeTarget::File => "Select File Icon Theme...",
+            IconThemeTarget::Folder => "Select Folder Icon Theme...",
+        }
+        .into()
     }
 
     fn match_count(&self) -> usize {
@@ -180,23 +224,28 @@ impl PickerDelegate for IconThemeSelectorDelegate {
         window: &mut Window,
         cx: &mut Context<Picker<IconThemeSelectorDelegate>>,
     ) {
+        let Some(theme_match) = self.matches.get(self.selected_index) else {
+            return;
+        };
+        let theme_name = IconThemeName(theme_match.string.clone().into());
         self.selection_completed = true;
-
-        let theme_settings = ThemeSettings::get_global(cx);
-        let theme_name = theme_settings
-            .icon_theme
-            .name(SystemAppearance::global(cx).0);
+        let target = self.target;
 
         telemetry::event!(
             "Settings Changed",
-            setting = "icon_theme",
+            setting = target.setting_name(),
             value = theme_name
         );
 
         let appearance = Appearance::from(window.appearance());
 
         update_settings_file(self.fs.clone(), cx, move |settings, _| {
-            theme_settings::set_icon_theme(settings, theme_name, appearance);
+            let selection = match target {
+                IconThemeTarget::Shared => &mut settings.theme.icon_theme,
+                IconThemeTarget::File => &mut settings.theme.file_icon_theme,
+                IconThemeTarget::Folder => &mut settings.theme.folder_icon_theme,
+            };
+            theme_settings::set_icon_theme(selection, theme_name, appearance);
         });
 
         self.selector
@@ -422,12 +471,11 @@ mod tests {
     }
 
     fn open_icon_theme_selector(
+        action: impl gpui::Action,
         workspace: &Entity<workspace::Workspace>,
         cx: &mut VisualTestContext,
     ) -> Entity<Picker<IconThemeSelectorDelegate>> {
-        cx.dispatch_action(zed_actions::icon_theme_selector::Toggle {
-            themes_filter: None,
-        });
+        cx.dispatch_action(action);
         cx.run_until_parked();
         workspace.update(cx, |workspace, cx| {
             workspace
@@ -468,6 +516,81 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_folder_icon_theme_preview_is_independent_and_can_be_canceled(
+        cx: &mut TestAppContext,
+    ) {
+        let app_state = setup_test(cx).await;
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store
+                    .set_user_settings(r#"{"file_icon_theme": "Test Icons A"}"#, cx)
+                    .unwrap();
+            });
+        });
+        let project = Project::test(app_state.fs.clone(), [path!("/test").as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+        let picker = open_icon_theme_selector(
+            zed_actions::icon_theme_selector::SelectFolderIconTheme,
+            &workspace,
+            cx,
+        );
+        assert_eq!(
+            selected_theme_name(&picker, cx),
+            theme::DEFAULT_ICON_THEME_NAME
+        );
+
+        picker.update_in(cx, |picker, window, cx| {
+            let index = picker
+                .delegate
+                .matches
+                .iter()
+                .position(|item| item.string == "Test Icons B")
+                .unwrap();
+            picker.set_selected_index(index, None, true, window, cx);
+        });
+        cx.read(|cx| {
+            let settings = ThemeSettings::get_global(cx);
+            let appearance = SystemAppearance::global(cx).0;
+            assert_eq!(
+                settings
+                    .file_icon_theme
+                    .as_ref()
+                    .unwrap()
+                    .name(appearance)
+                    .0
+                    .as_ref(),
+                "Test Icons A"
+            );
+            assert_eq!(
+                settings
+                    .folder_icon_theme
+                    .as_ref()
+                    .unwrap()
+                    .name(appearance)
+                    .0
+                    .as_ref(),
+                "Test Icons B"
+            );
+            assert_eq!(
+                settings.icon_theme.name(appearance).0.as_ref(),
+                theme::DEFAULT_ICON_THEME_NAME
+            );
+        });
+
+        picker.update_in(cx, |picker, window, cx| {
+            picker.delegate.dismissed(window, cx)
+        });
+        cx.read(|cx| {
+            let settings = ThemeSettings::get_global(cx);
+            assert!(settings.folder_icon_theme.is_none());
+            assert!(settings.file_icon_theme.is_some());
+        });
+    }
+
+    #[gpui::test]
     async fn test_icon_theme_selector_preserves_selection_on_empty_filter(cx: &mut TestAppContext) {
         let app_state = setup_test(cx).await;
         let project = Project::test(app_state.fs.clone(), [path!("/test").as_ref()], cx).await;
@@ -475,7 +598,11 @@ mod tests {
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
         let workspace =
             multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
-        let picker = open_icon_theme_selector(&workspace, cx);
+        let picker = open_icon_theme_selector(
+            zed_actions::icon_theme_selector::Toggle::default(),
+            &workspace,
+            cx,
+        );
 
         let target_index = picker.read_with(cx, |picker, _| {
             picker

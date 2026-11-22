@@ -16,9 +16,9 @@ use theme_settings::{
 use ui::{ListItem, ListItemSpacing, prelude::*, v_flex};
 use util::ResultExt;
 use workspace::{ModalView, Workspace, ui::HighlightedLabel, with_active_or_new_workspace};
-use zed_actions::{ExtensionCategoryFilter, Extensions};
+use zed_actions::{ExtensionCategoryFilter, Extensions, icon_theme_selector as icon_actions};
 
-use crate::icon_theme_selector::{IconThemeSelector, IconThemeSelectorDelegate};
+use crate::icon_theme_selector::{IconThemeSelector, IconThemeSelectorDelegate, IconThemeTarget};
 
 actions!(
     theme_selector,
@@ -35,10 +35,26 @@ pub fn init(cx: &mut App) {
             toggle_theme_selector(workspace, &action, window, cx);
         });
     });
-    cx.on_action(|action: &zed_actions::icon_theme_selector::Toggle, cx| {
+    cx.on_action(|action: &icon_actions::Toggle, cx| {
         let action = action.clone();
         with_active_or_new_workspace(cx, move |workspace, window, cx| {
-            toggle_icon_theme_selector(workspace, &action, window, cx);
+            toggle_icon_theme_selector(
+                workspace,
+                IconThemeTarget::Shared,
+                action.themes_filter.as_ref(),
+                window,
+                cx,
+            );
+        });
+    });
+    cx.on_action(|_: &icon_actions::SelectFileIconTheme, cx| {
+        with_active_or_new_workspace(cx, |workspace, window, cx| {
+            toggle_icon_theme_selector(workspace, IconThemeTarget::File, None, window, cx);
+        });
+    });
+    cx.on_action(|_: &icon_actions::SelectFolderIconTheme, cx| {
+        with_active_or_new_workspace(cx, |workspace, window, cx| {
+            toggle_icon_theme_selector(workspace, IconThemeTarget::Folder, None, window, cx);
         });
     });
 }
@@ -63,18 +79,15 @@ fn toggle_theme_selector(
 
 fn toggle_icon_theme_selector(
     workspace: &mut Workspace,
-    toggle: &zed_actions::icon_theme_selector::Toggle,
+    target: IconThemeTarget,
+    themes_filter: Option<&Vec<String>>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
     let fs = workspace.app_state().fs.clone();
     workspace.toggle_modal(window, cx, |window, cx| {
-        let delegate = IconThemeSelectorDelegate::new(
-            cx.entity().downgrade(),
-            fs,
-            toggle.themes_filter.as_ref(),
-            cx,
-        );
+        let delegate =
+            IconThemeSelectorDelegate::new(cx.entity().downgrade(), fs, target, themes_filter, cx);
         IconThemeSelector::new(delegate, window, cx)
     });
 }
