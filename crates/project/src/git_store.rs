@@ -6527,12 +6527,14 @@ pub fn stash_to_proto(entry: &StashEntry) -> proto::StashEntry {
         branch: entry.branch.clone(),
         index: entry.index as u64,
         timestamp: entry.timestamp,
+        base: entry.base.map(|base| base.as_bytes().to_vec()),
     }
 }
 
 pub fn proto_to_stash(entry: &proto::StashEntry) -> Result<StashEntry> {
     Ok(StashEntry {
         oid: Oid::from_bytes(&entry.oid)?,
+        base: entry.base.as_deref().map(Oid::from_bytes).transpose()?,
         message: entry.message.clone(),
         index: entry.index as usize,
         branch: entry.branch.clone(),
@@ -6807,14 +6809,16 @@ impl Repository {
             RepositoryEvent::TagsChanged => {
                 self.initial_graph_data.clear();
             }
-            RepositoryEvent::StashEntriesChanged => {
-                if self.scan_id > 2 {
-                    self.initial_graph_data
-                        .retain(|(log_source, _), _| *log_source != LogSource::All);
-                }
-            }
             _ => {}
         }
+    }
+
+    fn set_stash_entries(&mut self, stash_entries: GitStash, cx: &mut Context<Self>) {
+        self.snapshot.stash_entries = stash_entries;
+        // Evict before forwarding the snapshot so a peer cannot reload stale stash rows.
+        self.initial_graph_data
+            .retain(|(log_source, _), _| *log_source != LogSource::All);
+        cx.emit(RepositoryEvent::StashEntriesChanged);
     }
 
     pub fn git_store(&self) -> Option<Entity<GitStore>> {
@@ -7647,9 +7651,17 @@ impl Repository {
                     });
 
                     for commit_data in initial_graph_commit_data {
-                        graph_data
-                            .commit_oid_to_index
-                            .insert(commit_data.sha, graph_data.commit_data.len());
+                        let index = graph_data.commit_data.len();
+                        if commit_data.stash.is_some() {
+                            graph_data
+                                .commit_oid_to_index
+                                .entry(commit_data.sha)
+                                .or_insert(index);
+                        } else {
+                            graph_data
+                                .commit_oid_to_index
+                                .insert(commit_data.sha, index);
+                        }
                         graph_data.commit_data.push(commit_data);
                     }
                     cx.emit(RepositoryEvent::GraphEvent(
@@ -8693,8 +8705,7 @@ impl Repository {
                         && let Ok(stash_entries) = backend.stash_entries().await
                     {
                         let snapshot = this.update(&mut cx, |this, cx| {
-                            this.snapshot.stash_entries = stash_entries;
-                            cx.emit(RepositoryEvent::StashEntriesChanged);
+                            this.set_stash_entries(stash_entries, cx);
                             this.snapshot.clone()
                         })?;
                         if let Some(updates_tx) = updates_tx {
@@ -10229,9 +10240,8 @@ impl Repository {
                 .collect(),
         };
         if self.snapshot.stash_entries != new_stash_entries {
-            cx.emit(RepositoryEvent::StashEntriesChanged)
+            self.set_stash_entries(new_stash_entries, cx);
         }
-        self.snapshot.stash_entries = new_stash_entries;
         let new_linked_worktrees: Arc<[GitWorktree]> = update
             .linked_worktrees
             .iter()
@@ -11389,6 +11399,7 @@ fn initial_graph_commit_to_proto(commit: &InitialGraphCommitData) -> proto::Init
             .iter()
             .map(|ref_name| ref_name.to_string())
             .collect(),
+        stash: commit.stash.as_deref().map(stash_to_proto),
     }
 }
 
@@ -11408,6 +11419,12 @@ fn initial_graph_commit_from_proto(
             .into_iter()
             .map(SharedString::from)
             .collect(),
+        stash: commit
+            .stash
+            .as_ref()
+            .map(proto_to_stash)
+            .transpose()?
+            .map(Arc::new),
     }))
 }
 
@@ -11620,6 +11637,46 @@ mod tests {
     use serde_json::json;
     use settings::SettingsStore;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn test_initial_graph_commit_stash_proto_roundtrip() -> Result<()> {
+        use proto::Message as _;
+
+        let sha = Oid::from_bytes(&[1; 20])?;
+        let base = Oid::from_bytes(&[2; 20])?;
+        let stash = StashEntry {
+            index: 3,
+            oid: sha,
+            base: Some(base),
+            message: "Graph stash".to_owned(),
+            branch: Some("main".to_owned()),
+            timestamp: 123,
+        };
+        for stash in [
+            None,
+            Some(Arc::new(StashEntry {
+                base: None,
+                ..stash.clone()
+            })),
+            Some(Arc::new(stash)),
+        ] {
+            let commit = InitialGraphCommitData {
+                sha,
+                parents: SmallVec::from_slice(&[base]),
+                ref_names: Vec::new(),
+                stash,
+            };
+            let encoded = initial_graph_commit_to_proto(&commit).encode_to_vec();
+            let decoded = initial_graph_commit_from_proto(proto::InitialGraphCommit::decode(
+                encoded.as_slice(),
+            )?)?;
+            assert_eq!(decoded.sha, commit.sha);
+            assert_eq!(decoded.parents, commit.parents);
+            assert_eq!(decoded.ref_names, commit.ref_names);
+            assert_eq!(decoded.stash, commit.stash);
+        }
+        Ok(())
+    }
 
     fn init_test(cx: &mut TestAppContext) {
         cx.update(|cx| {
@@ -13792,13 +13849,12 @@ async fn compute_snapshot(
             cx.emit(RepositoryEvent::StatusesChanged);
         }
         if stash_entries != this.snapshot.stash_entries {
-            cx.emit(RepositoryEvent::StashEntriesChanged);
+            this.set_stash_entries(stash_entries, cx);
         }
 
         this.snapshot.scan_id += 1;
         this.snapshot.merge = merge_details;
         this.snapshot.statuses_by_path = statuses_by_path;
-        this.snapshot.stash_entries = stash_entries;
 
         this.snapshot.clone()
     })

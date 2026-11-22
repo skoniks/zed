@@ -823,6 +823,18 @@ struct CommitEntry {
     color_idx: usize,
 }
 
+impl CommitEntry {
+    fn subject(&self, commit_data: &CommitDataState) -> SharedString {
+        if let Some(stash) = &self.data.stash {
+            return stash.message.clone().into();
+        }
+        match commit_data {
+            CommitDataState::Loaded(data) => data.subject.clone(),
+            _ => "Loading…".into(),
+        }
+    }
+}
+
 type ActiveLaneIdx = usize;
 
 enum AllCommitCount {
@@ -969,16 +981,20 @@ impl GraphData {
         for commit in commits.iter() {
             let commit_row = self.commits.len();
 
-            let commit_lane = self
-                .parent_to_lanes
-                .get(&commit.sha)
-                .and_then(|lanes| lanes.iter().min().copied());
-
-            let commit_lane = commit_lane.unwrap_or_else(|| self.first_empty_lane_idx());
-
+            // A stash row can share a SHA with a regular commit, but incoming
+            // history lines must end at the regular row.
+            let incoming_lanes = if commit.stash.is_none() {
+                self.parent_to_lanes.remove(&commit.sha)
+            } else {
+                None
+            };
+            let commit_lane = incoming_lanes
+                .as_ref()
+                .and_then(|lanes| lanes.iter().min().copied())
+                .unwrap_or_else(|| self.first_empty_lane_idx());
             let commit_color = self.get_lane_color(commit_lane);
 
-            if let Some(lanes) = self.parent_to_lanes.remove(&commit.sha) {
+            if let Some(lanes) = incoming_lanes {
                 for lane_column in lanes {
                     let state = &mut self.lane_states[lane_column];
 
@@ -1338,14 +1354,12 @@ fn paint_dashed_connector(
     }
 }
 
-/// Draws a commit node: a background-colored "halo" ring that masks any
-/// connector lines passing through the lane, an outer ring in the branch
-/// color, and a lighter center so the node reads as a clear, distinct point.
 fn draw_commit_circle(
     center_x: Pixels,
     center_y: Pixels,
     color: Hsla,
     background: Hsla,
+    is_stash: bool,
     window: &mut Window,
 ) {
     // Halo: clears space around the node so crossing lines don't touch it.
@@ -1360,14 +1374,16 @@ fn draw_commit_circle(
     // Outer ring in the branch color.
     fill_circle(center_x, center_y, COMMIT_CIRCLE_RADIUS, color, window);
 
-    // Inner fill makes the node read as a ring rather than a solid dot.
-    fill_circle(
-        center_x,
-        center_y,
-        (COMMIT_CIRCLE_RADIUS - COMMIT_CIRCLE_STROKE_WIDTH).max(px(0.)),
-        background,
-        window,
-    );
+    // Stashes use a solid dot to distinguish them from regular commits.
+    if !is_stash {
+        fill_circle(
+            center_x,
+            center_y,
+            (COMMIT_CIRCLE_RADIUS - COMMIT_CIRCLE_STROKE_WIDTH).max(px(0.)),
+            background,
+            window,
+        );
+    }
 }
 
 fn compute_diff_stats(diff: &CommitDiff) -> (usize, usize) {
@@ -1391,6 +1407,35 @@ struct GitGraphContextMenu {
     position: Point<Pixels>,
     target_entry_index: Option<usize>,
     _subscription: Subscription,
+}
+
+#[derive(Clone, Copy)]
+enum RefChipKind {
+    Head,
+    Branch,
+    Tag,
+    Stash,
+}
+
+impl RefChipKind {
+    fn from_decoration(name: &str, is_head: bool) -> Self {
+        if is_head {
+            Self::Head
+        } else if name.starts_with("tag: ") {
+            Self::Tag
+        } else {
+            Self::Branch
+        }
+    }
+
+    fn icon(self) -> IconName {
+        match self {
+            Self::Head => IconName::Check,
+            Self::Branch => IconName::GitBranch,
+            Self::Tag => IconName::BookmarkOutlined,
+            Self::Stash => IconName::BoxOpen,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1851,11 +1896,17 @@ impl GitGraph {
                 }
             }
             RepositoryEvent::StashEntriesChanged if self.log_source == LogSource::All => {
-                // Stash entries initial's scan id is 2, so we don't want to invalidate the graph before that
-                if repository.read(cx).scan_id > 2 {
-                    self.pending_select_sha = None;
-                    self.invalidate_state(cx);
-                }
+                // Stash rows shift indices and can share a SHA, so only carry
+                // regular commit selections across the reload.
+                let selected_commit = self
+                    .selected_entry_idx
+                    .take()
+                    .and_then(|index| self.graph_data.commits.get(index))
+                    .filter(|commit| commit.data.stash.is_none());
+                self.pending_select_sha = self
+                    .pending_select_sha
+                    .or_else(|| selected_commit.map(|commit| commit.data.sha));
+                self.invalidate_state(cx);
             }
             RepositoryEvent::GraphEvent(_, _) => {}
             _ => {}
@@ -1899,48 +1950,51 @@ impl GitGraph {
         Some(SharedString::from(name.to_string()))
     }
 
-    /// Renders a ref chip for the commit at `commit_idx`. Chips get a
-    /// right-click handler that opens a ref-specific context menu, so that
-    /// custom commands can be resolved against the clicked ref.
+    fn ref_display_name(decoration: &SharedString) -> SharedString {
+        decoration
+            .strip_prefix("tag: ")
+            .map(SharedString::from)
+            .unwrap_or_else(|| decoration.clone())
+    }
+
     fn render_ref_chip(
         &self,
         name: SharedString,
         accent_color: gpui::Hsla,
-        is_head: bool,
+        kind: RefChipKind,
         commit_idx: usize,
         background: gpui::Hsla,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let tooltip_text = name.clone();
+        let display_name = Self::ref_display_name(&name);
         let chip_id = SharedString::from(format!("git-graph-ref-chip-{commit_idx}-{name}"));
 
         div()
+            .debug_selector(|| chip_id.to_string())
             .id(chip_id)
             .min_w_0()
             .overflow_hidden()
             .child(
-                Chip::new(name.clone())
+                Chip::new(display_name.clone())
                     .label_size(LabelSize::Small)
+                    .icon(kind.icon())
                     .truncate()
                     .map(|chip| {
-                        if is_head {
-                            chip.icon(IconName::Check)
-                                .bg_color(background.blend(accent_color.opacity(0.25)))
+                        if matches!(kind, RefChipKind::Head) {
+                            chip.bg_color(background.blend(accent_color.opacity(0.25)))
                                 .border_color(accent_color.opacity(0.5))
                         } else {
-                            chip.icon(IconName::GitBranch)
-                                .icon_color(Color::Custom(accent_color))
+                            chip.icon_color(Color::Custom(accent_color))
                                 .bg_color(background.blend(accent_color.opacity(0.08)))
                                 .border_color(accent_color.opacity(0.25))
                         }
                     }),
             )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener({
-                    move |this, event: &MouseDownEvent, window, cx| {
+            .when(!matches!(kind, RefChipKind::Stash), |chip| {
+                chip.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                         cx.stop_propagation();
-
                         this.deploy_ref_context_menu(
                             event.position,
                             commit_idx,
@@ -1948,10 +2002,10 @@ impl GitGraph {
                             window,
                             cx,
                         );
-                    }
-                }),
-            )
-            .tooltip(move |_window, cx| Tooltip::simple(tooltip_text.clone(), cx))
+                    }),
+                )
+            })
+            .tooltip(move |_window, cx| Tooltip::simple(display_name.clone(), cx))
             .into_any_element()
     }
 
@@ -1964,7 +2018,7 @@ impl GitGraph {
     ) -> AnyElement {
         let hidden_refs_text = hidden_refs
             .iter()
-            .map(|ref_name| format!("- {ref_name}"))
+            .map(|ref_name| format!("- {}", Self::ref_display_name(ref_name)))
             .collect::<Vec<_>>()
             .join("\n");
         let chip_id = SharedString::from(format!("git-graph-ref-count-chip-{commit_idx}"));
@@ -2073,12 +2127,11 @@ impl GitGraph {
 
                 let short_sha = commit.data.sha.display_short();
                 let mut formatted_time = String::new();
-                let subject: SharedString;
+                let subject = commit.subject(&data);
                 let author_name: SharedString;
                 let author_email: Option<SharedString>;
 
                 if let CommitDataState::Loaded(ref data) = data {
-                    subject = data.subject.clone();
                     author_name = data.author_name.clone();
                     author_email =
                         (!data.author_email.is_empty()).then(|| data.author_email.clone());
@@ -2088,7 +2141,6 @@ impl GitGraph {
                         cx,
                     );
                 } else {
-                    subject = "Loading…".into();
                     author_name = SharedString::default();
                     author_email = None;
                 }
@@ -2144,7 +2196,7 @@ impl GitGraph {
                     div()
                         .id(ElementId::NamedInteger("commit-subject".into(), idx as u64))
                         .overflow_hidden()
-                        .child(h_flex().gap_2().overflow_hidden().child(subject_label))
+                        .child(subject_label)
                         .into_any_element(),
                     column_label(formatted_time.into()),
                     {
@@ -2694,7 +2746,7 @@ impl GitGraph {
         let ref_entry = self.ref_menu_entry(commit.data.sha, &name, cx);
         let git_graph = cx.entity();
         let context_menu = ContextMenu::build(window, cx, move |menu, window, _| {
-            menu.header(format!("Ref {name}"))
+            menu.header(format!("Ref {}", Self::ref_display_name(&name)))
                 .map(|menu| ref_entry.add_entries(menu, &git_graph, window))
         });
 
@@ -2726,9 +2778,12 @@ impl GitGraph {
             menu = menu.header("Refs");
             for (ref_entry, name) in ref_entries {
                 let git_graph = git_graph.clone();
-                menu = menu.submenu(name, move |submenu, window, _cx| {
-                    ref_entry.clone().add_entries(submenu, &git_graph, window)
-                });
+                menu = menu.submenu(
+                    Self::ref_display_name(&name),
+                    move |submenu, window, _cx| {
+                        ref_entry.clone().add_entries(submenu, &git_graph, window)
+                    },
+                );
             }
             menu
         });
@@ -3264,7 +3319,7 @@ impl GitGraph {
                                     self.render_ref_chip(
                                         name.clone(),
                                         accent_color,
-                                        is_head,
+                                        RefChipKind::from_decoration(name, is_head),
                                         selected_idx,
                                         cx.theme().colors().editor_background,
                                         cx,
@@ -3682,7 +3737,9 @@ impl GitGraph {
 
                         let commit_x = lane_center_x(bounds, row.lane as f32);
 
-                        if paint_ref_connectors && !row.data.ref_names.is_empty() {
+                        if paint_ref_connectors
+                            && (row.data.stash.is_some() || !row.data.ref_names.is_empty())
+                        {
                             paint_dashed_connector(
                                 bounds.origin.x,
                                 commit_x - COMMIT_CIRCLE_RADIUS,
@@ -3709,6 +3766,7 @@ impl GitGraph {
                             row_y_center,
                             row_color,
                             node_background,
+                            row.data.stash.is_some(),
                             window,
                         );
                     }
@@ -3970,44 +4028,44 @@ impl GitGraph {
             let Some(commit) = self.graph_data.commits.get(absolute_idx) else {
                 continue;
             };
-            if commit.data.ref_names.is_empty() {
-                continue;
-            }
+            let (primary_name, kind) = if let Some(stash) = &commit.data.stash {
+                (stash.name().into(), RefChipKind::Stash)
+            } else {
+                // Prefer the checked-out branch and collapse any remaining refs into +N.
+                let ref_names = &commit.data.ref_names;
+                if let Some(head_ref) = ref_names
+                    .iter()
+                    .find(|name| Self::is_head_ref(name.as_ref(), &head_branch_name))
+                {
+                    (head_ref.clone(), RefChipKind::Head)
+                } else if let Some(first_ref) = ref_names.first() {
+                    (
+                        first_ref.clone(),
+                        RefChipKind::from_decoration(first_ref, false),
+                    )
+                } else {
+                    continue;
+                }
+            };
 
             let visible_row_idx = absolute_idx - first_visible_row;
             let top = visible_row_idx as f32 * row_height - vertical_scroll_offset;
             let accent_color = accent_colors.color_for_index(commit.color_idx as u32);
-            let ref_names = commit.data.ref_names.clone();
-
-            // When a commit carries multiple refs we only render a single badge
-            // (preferring the checked-out branch, falling back to the first ref)
-            // plus a "+N" counter, so the gutter stays legible instead of
-            // cramming several truncated chips together.
-            let (primary_name, is_head) = match ref_names
-                .iter()
-                .find(|name| Self::is_head_ref(name.as_ref(), &head_branch_name))
-            {
-                Some(head_ref) => (head_ref.clone(), true),
-                None => match ref_names.first() {
-                    Some(first) => (first.clone(), false),
-                    None => continue,
-                },
-            };
-
-            let primary_chip = self.render_ref_chip(
-                primary_name.clone(),
-                accent_color,
-                is_head,
-                absolute_idx,
-                background,
-                cx,
-            );
-
-            let hidden_refs = ref_names
+            let hidden_refs = commit
+                .data
+                .ref_names
                 .iter()
                 .filter(|name| *name != &primary_name)
                 .cloned()
                 .collect::<Vec<_>>();
+            let primary_chip = self.render_ref_chip(
+                primary_name,
+                accent_color,
+                kind,
+                absolute_idx,
+                background,
+                cx,
+            );
             let count_chip = (!hidden_refs.is_empty())
                 .then(|| self.render_ref_count_chip(hidden_refs, accent_color, absolute_idx, cx));
 
@@ -5343,6 +5401,7 @@ pub fn generate_random_commit_dag(
             sha,
             parents,
             ref_names,
+            stash: None,
         }));
     }
 
@@ -5414,6 +5473,7 @@ mod tests {
     use fs::FakeFs;
     use git::Oid;
     use git::repository::{CommitData, InitialGraphCommitData};
+    use git::stash::{GitStash, StashEntry};
     use gpui::{TestAppContext, UpdateGlobal};
     use project::git_store::{GitStoreEvent, RepositoryEvent};
     use project::{
@@ -5894,21 +5954,25 @@ mod tests {
                 sha: oid1,
                 parents: smallvec![oid2, oid3],
                 ref_names: vec!["HEAD".into()],
+                stash: None,
             }),
             Arc::new(InitialGraphCommitData {
                 sha: oid2,
                 parents: smallvec![oid4],
                 ref_names: vec![],
+                stash: None,
             }),
             Arc::new(InitialGraphCommitData {
                 sha: oid3,
                 parents: smallvec![oid4],
                 ref_names: vec![],
+                stash: None,
             }),
             Arc::new(InitialGraphCommitData {
                 sha: oid4,
                 parents: smallvec![],
                 ref_names: vec![],
+                stash: None,
             }),
         ];
 
@@ -5933,16 +5997,19 @@ mod tests {
                 sha: oid1,
                 parents: smallvec![oid2],
                 ref_names: vec!["HEAD".into()],
+                stash: None,
             }),
             Arc::new(InitialGraphCommitData {
                 sha: oid2,
                 parents: smallvec![oid3],
                 ref_names: vec![],
+                stash: None,
             }),
             Arc::new(InitialGraphCommitData {
                 sha: oid3,
                 parents: smallvec![],
                 ref_names: vec![],
+                stash: None,
             }),
         ];
 
@@ -5952,6 +6019,48 @@ mod tests {
         if let Err(error) = verify_all_invariants(&graph_data, &commits) {
             panic!("Graph invariant violation for linear commits:\n{}", error);
         }
+    }
+
+    #[test]
+    fn test_stash_row_does_not_take_incoming_commit_lane() {
+        let head_sha = Oid::from_bytes(&[1; 20]).unwrap();
+        let shared_sha = Oid::from_bytes(&[2; 20]).unwrap();
+        let commits = [
+            Arc::new(InitialGraphCommitData {
+                sha: head_sha,
+                parents: smallvec![shared_sha],
+                ref_names: vec!["HEAD -> main".into()],
+                stash: None,
+            }),
+            Arc::new(InitialGraphCommitData {
+                sha: shared_sha,
+                parents: smallvec![],
+                ref_names: vec![],
+                stash: Some(Arc::new(StashEntry {
+                    index: 0,
+                    oid: shared_sha,
+                    base: None,
+                    message: "Stash without a visible base".into(),
+                    branch: None,
+                    timestamp: 1,
+                })),
+            }),
+            Arc::new(InitialGraphCommitData {
+                sha: shared_sha,
+                parents: smallvec![],
+                ref_names: vec!["tag: saved".into()],
+                stash: None,
+            }),
+        ];
+
+        let mut graph = GraphData::new(8);
+        graph.add_commits(&commits);
+
+        assert_ne!(graph.commits[1].lane, graph.commits[2].lane);
+        assert_eq!(graph.lines.len(), 1);
+        assert_eq!(graph.lines[0].child, head_sha);
+        assert_eq!(graph.lines[0].parent, shared_sha);
+        assert_eq!(graph.lines[0].full_interval, 0..2);
     }
 
     #[test]
@@ -6369,6 +6478,7 @@ mod tests {
             sha: Oid::from_bytes(&[1; 20]).unwrap(),
             parents: smallvec![],
             ref_names: vec!["HEAD".into(), "refs/heads/main".into()],
+            stash: None,
         })];
         fs.set_graph_commits(Path::new(util::path!("/project/.git")), commits);
 
@@ -6926,16 +7036,19 @@ mod tests {
                 sha: first_sha,
                 parents: smallvec![target_sha],
                 ref_names: vec!["HEAD".into(), "refs/heads/main".into()],
+                stash: None,
             }),
             Arc::new(InitialGraphCommitData {
                 sha: target_sha,
                 parents: smallvec![third_sha],
                 ref_names: vec![],
+                stash: None,
             }),
             Arc::new(InitialGraphCommitData {
                 sha: third_sha,
                 parents: smallvec![],
                 ref_names: vec![],
+                stash: None,
             }),
         ];
         fs.set_graph_commits(Path::new("/project/.git"), commits);
@@ -7032,6 +7145,8 @@ mod tests {
 
     #[gpui::test]
     async fn test_graph_data_reloaded_after_stash_change(cx: &mut TestAppContext) {
+        use gpui::VisualContext as _;
+
         init_test(cx);
 
         let fs = FakeFs::new(cx.executor());
@@ -7044,39 +7159,79 @@ mod tests {
         )
         .await;
 
-        let initial_head = Oid::from_bytes(&[1; 20]).unwrap();
-        let initial_stash = Oid::from_bytes(&[2; 20]).unwrap();
-        let updated_head = Oid::from_bytes(&[3; 20]).unwrap();
-        let updated_stash = Oid::from_bytes(&[4; 20]).unwrap();
+        let dot_git = Path::new("/project/.git");
+        let head_sha = Oid::from_bytes(&[1; 20]).unwrap();
+        let base_sha = Oid::from_bytes(&[2; 20]).unwrap();
+        let stash_sha = Oid::from_bytes(&[3; 20]).unwrap();
+        let head = Arc::new(InitialGraphCommitData {
+            sha: head_sha,
+            parents: smallvec![base_sha],
+            ref_names: vec!["HEAD -> main".into()],
+            stash: None,
+        });
+        let base = Arc::new(InitialGraphCommitData {
+            sha: base_sha,
+            parents: smallvec![],
+            ref_names: vec!["tag: v1.0".into()],
+            stash: None,
+        });
+        let newer_stash = StashEntry {
+            index: 0,
+            oid: stash_sha,
+            base: Some(base_sha),
+            message: "newer stash".into(),
+            branch: Some("main".into()),
+            timestamp: 2,
+        };
+        let older_stash = StashEntry {
+            index: 1,
+            message: "older stash".into(),
+            timestamp: 1,
+            ..newer_stash.clone()
+        };
+        let set_stashes = |entries: Vec<StashEntry>| {
+            fs.with_git_state(dot_git, true, |state| {
+                let mut commits = vec![head.clone()];
+                commits.extend(entries.iter().cloned().map(|entry| {
+                    Arc::new(InitialGraphCommitData {
+                        sha: entry.oid,
+                        parents: entry.base.into_iter().collect(),
+                        ref_names: vec![],
+                        stash: Some(Arc::new(entry)),
+                    })
+                }));
+                commits.push(base.clone());
+                state.graph_commits = commits;
+                state.stash_entries = GitStash {
+                    entries: entries.into(),
+                };
+            })
+            .unwrap();
+        };
+        set_stashes(vec![newer_stash, older_stash.clone()]);
 
-        fs.set_graph_commits(
-            Path::new("/project/.git"),
-            vec![
-                Arc::new(InitialGraphCommitData {
-                    sha: initial_head,
-                    parents: smallvec![initial_stash],
-                    ref_names: vec!["HEAD".into(), "refs/heads/main".into()],
-                }),
-                Arc::new(InitialGraphCommitData {
-                    sha: initial_stash,
-                    parents: smallvec![],
-                    ref_names: vec!["refs/stash".into()],
-                }),
-            ],
+        fs.set_commit_data(
+            dot_git,
+            [
+                (head_sha, smallvec![base_sha]),
+                (base_sha, smallvec![]),
+                (stash_sha, smallvec![base_sha]),
+            ]
+            .map(|(sha, parents)| {
+                (
+                    CommitData {
+                        sha,
+                        parents,
+                        author_name: "Author".into(),
+                        author_email: "author@example.com".into(),
+                        commit_timestamp: 1,
+                        subject: "Git commit subject".into(),
+                        message: "Git commit subject".into(),
+                    },
+                    false,
+                )
+            }),
         );
-        fs.with_git_state(Path::new("/project/.git"), true, |state| {
-            state.stash_entries = git::stash::GitStash {
-                entries: vec![git::stash::StashEntry {
-                    index: 0,
-                    oid: initial_stash,
-                    message: "initial stash".to_string(),
-                    branch: Some("main".to_string()),
-                    timestamp: 1,
-                }]
-                .into(),
-            };
-        })
-        .unwrap();
 
         let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
         cx.run_until_parked();
@@ -7092,7 +7247,7 @@ mod tests {
         });
         let workspace_weak =
             multi_workspace.read_with(&*cx, |multi, _| multi.workspace().downgrade());
-        let git_graph = cx.new_window_entity(|window, cx| {
+        let git_graph = cx.replace_root_view(|window, cx| {
             GitGraph::new(
                 repository.read(cx).id,
                 project.read(cx).git_store().clone(),
@@ -7104,44 +7259,61 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let initial_shas = git_graph.read_with(&*cx, |graph, _| {
-            graph
-                .graph_data
-                .commits
-                .iter()
-                .map(|commit| commit.data.sha)
-                .collect::<Vec<_>>()
-        });
-        assert_eq!(initial_shas, vec![initial_head, initial_stash]);
+        if cfg!(debug_assertions) {
+            let refs_bounds = git_graph.read_with(&*cx, |graph, _| {
+                graph
+                    .ref_labels_bounds
+                    .get()
+                    .expect("Refs column should be rendered")
+            });
+            for selector in [
+                "git-graph-ref-chip-1-stash@{0}",
+                "git-graph-ref-chip-2-stash@{1}",
+                "git-graph-ref-chip-3-tag: v1.0",
+            ] {
+                let chip_bounds = cx
+                    .debug_bounds(selector)
+                    .expect("ref chip should be rendered");
+                assert!(
+                    refs_bounds.contains(&chip_bounds.center()),
+                    "{selector} is outside the Refs column"
+                );
+            }
+        }
 
-        fs.set_graph_commits(
-            Path::new("/project/.git"),
-            vec![
-                Arc::new(InitialGraphCommitData {
-                    sha: updated_head,
-                    parents: smallvec![updated_stash],
-                    ref_names: vec!["HEAD".into(), "refs/heads/main".into()],
-                }),
-                Arc::new(InitialGraphCommitData {
-                    sha: updated_stash,
-                    parents: smallvec![],
-                    ref_names: vec!["refs/stash".into()],
-                }),
-            ],
-        );
-        fs.with_git_state(Path::new("/project/.git"), true, |state| {
-            state.stash_entries = git::stash::GitStash {
-                entries: vec![git::stash::StashEntry {
-                    index: 0,
-                    oid: updated_stash,
-                    message: "updated stash".to_string(),
-                    branch: Some("main".to_string()),
-                    timestamp: 1,
-                }]
-                .into(),
+        git_graph.read_with(&*cx, |graph, _| {
+            let [head, newer, older, base] = graph.graph_data.commits.as_slice() else {
+                panic!("expected two stash rows before their base");
             };
-        })
-        .unwrap();
+            assert_eq!(head.data.sha, head_sha);
+            assert_eq!(base.data.sha, base_sha);
+            assert_eq!(head.lane, base.lane);
+            assert_ne!(newer.lane, older.lane);
+            for (row, stash, name, message) in [
+                (1, newer, "stash@{0}", "newer stash"),
+                (2, older, "stash@{1}", "older stash"),
+            ] {
+                assert_eq!(stash.data.sha, stash_sha);
+                assert_eq!(stash.data.stash.as_ref().unwrap().name(), name);
+                assert_eq!(stash.subject(&CommitDataState::Loading(None)), message);
+                assert_ne!(stash.lane, base.lane);
+                assert!(graph.graph_data.lines.iter().any(|line| {
+                    line.child == stash_sha
+                        && line.parent == base_sha
+                        && line.child_column == stash.lane
+                        && line.full_interval == (row..3)
+                }));
+            }
+        });
+        git_graph.update(cx, |graph, cx| {
+            graph.select_commit_by_sha(base_sha, cx);
+            assert_eq!(graph.selected_entry_idx, Some(3));
+        });
+
+        set_stashes(vec![StashEntry {
+            index: 0,
+            ..older_stash
+        }]);
 
         project
             .update(cx, |project, cx| project.git_scans_complete(cx))
@@ -7155,15 +7327,23 @@ mod tests {
         );
         cx.run_until_parked();
 
-        let reloaded_shas = git_graph.read_with(&*cx, |graph, _| {
-            graph
-                .graph_data
-                .commits
-                .iter()
-                .map(|commit| commit.data.sha)
-                .collect::<Vec<_>>()
+        git_graph.read_with(&*cx, |graph, _| {
+            let [head, stash, base] = graph.graph_data.commits.as_slice() else {
+                panic!("expected only the surviving stash row");
+            };
+            assert_eq!(head.data.sha, head_sha);
+            assert_eq!(stash.data.sha, stash_sha);
+            assert_eq!(base.data.sha, base_sha);
+            assert_eq!(stash.data.stash.as_ref().unwrap().name(), "stash@{0}");
+            assert_eq!(
+                stash.subject(&CommitDataState::Loading(None)),
+                "older stash"
+            );
+            assert!(graph.graph_data.lines.iter().any(|line| {
+                line.child == stash_sha && line.parent == base_sha && line.full_interval == (1..2)
+            }));
+            assert_eq!(graph.selected_entry_idx, Some(2));
         });
-        assert_eq!(reloaded_shas, vec![updated_head, updated_stash]);
     }
 
     #[gpui::test]
@@ -7187,6 +7367,7 @@ mod tests {
                 sha: head,
                 parents: smallvec![],
                 ref_names: vec!["HEAD -> main".into()],
+                stash: None,
             })],
         );
 
@@ -7237,6 +7418,7 @@ mod tests {
                 sha: head,
                 parents: smallvec![],
                 ref_names: vec!["HEAD -> main".into(), "tag: v1.0.0".into()],
+                stash: None,
             })],
         );
         repository
@@ -7612,6 +7794,7 @@ mod tests {
                 SharedString::from("origin/main"),
                 SharedString::from("tag: v1.0.0"),
             ],
+            stash: None,
         })];
         fs.set_graph_commits(Path::new("/project/.git"), commits);
 
@@ -7680,6 +7863,7 @@ mod tests {
                 SharedString::from("tag: v1.0.0"),
                 SharedString::from("tag: v1.1.0"),
             ],
+            stash: None,
         })];
         fs.set_graph_commits(Path::new("/project/.git"), commits);
 
@@ -7765,11 +7949,13 @@ mod tests {
                     sha: second_sha,
                     parents: smallvec![first_sha],
                     ref_names: vec!["HEAD -> main".into()],
+                    stash: None,
                 }),
                 Arc::new(InitialGraphCommitData {
                     sha: first_sha,
                     parents: smallvec![],
                     ref_names: Vec::new(),
+                    stash: None,
                 }),
             ],
         );
@@ -7863,6 +8049,7 @@ mod tests {
                 sha: first_sha,
                 parents: smallvec![],
                 ref_names: vec!["HEAD -> main".into()],
+                stash: None,
             })],
         );
         fs.set_commit_data(
@@ -8163,6 +8350,7 @@ mod tests {
                 sha: commit_sha,
                 parents: SmallVec::new(),
                 ref_names: Vec::new(),
+                stash: None,
             })],
         );
 
@@ -8317,6 +8505,7 @@ mod tests {
                 sha: commit_sha,
                 parents: SmallVec::new(),
                 ref_names: vec!["HEAD -> feature-x".into()],
+                stash: None,
             })],
         );
 
@@ -8422,6 +8611,18 @@ mod tests {
     }
 
     #[test]
+    fn test_ref_display_name() {
+        for (decoration, expected) in [
+            ("tag: v1.0", "v1.0"),
+            ("HEAD -> main", "HEAD -> main"),
+            ("origin/main", "origin/main"),
+            ("stash@{0}", "stash@{0}"),
+        ] {
+            assert_eq!(GitGraph::ref_display_name(&decoration.into()), expected);
+        }
+    }
+
+    #[test]
     fn test_ref_name_from_decoration() {
         assert_eq!(
             GitGraph::ref_name_from_decoration("HEAD -> main"),
@@ -8458,6 +8659,7 @@ mod tests {
             sha: commit_sha,
             parents: smallvec![],
             ref_names: vec!["HEAD -> main".into()],
+            stash: None,
         })];
         fs.set_graph_commits(Path::new("/project/.git"), commits);
         fs.set_commit_data(
@@ -8538,6 +8740,7 @@ mod tests {
             sha: commit_sha,
             parents: smallvec![],
             ref_names: vec!["HEAD -> main".into()],
+            stash: None,
         })];
         fs.set_graph_commits(Path::new("/project/.git"), commits);
 
@@ -8669,6 +8872,7 @@ mod tests {
             sha: commit_sha,
             parents: smallvec![],
             ref_names: vec!["HEAD -> main".into()],
+            stash: None,
         })];
         fs.set_graph_commits(Path::new("/project/.git"), commits);
         fs.set_commit_data(

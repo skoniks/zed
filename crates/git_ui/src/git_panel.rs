@@ -11584,6 +11584,7 @@ mod tests {
                 sha,
                 parents: SmallVec::new(),
                 ref_names: Vec::new(),
+                stash: None,
             })];
         })
         .unwrap();
@@ -11619,6 +11620,7 @@ mod tests {
                 sha,
                 parents: SmallVec::new(),
                 ref_names: Vec::new(),
+                stash: None,
             })];
         })
         .unwrap();
@@ -11694,6 +11696,7 @@ mod tests {
                         sha,
                         parents: SmallVec::new(),
                         ref_names: Vec::new(),
+                        stash: None,
                     })
                 })
                 .collect();

@@ -697,6 +697,7 @@ mod tests {
         StashEntry {
             index,
             oid,
+            base: None,
             message: message.to_string(),
             branch: branch.map(Into::into),
             timestamp: 1000 - index as i64,
