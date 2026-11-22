@@ -1412,30 +1412,8 @@ struct GitGraphContextMenu {
 #[derive(Clone, Copy)]
 enum RefChipKind {
     Head,
-    Branch,
-    Tag,
+    Regular,
     Stash,
-}
-
-impl RefChipKind {
-    fn from_decoration(name: &str, is_head: bool) -> Self {
-        if is_head {
-            Self::Head
-        } else if name.starts_with("tag: ") {
-            Self::Tag
-        } else {
-            Self::Branch
-        }
-    }
-
-    fn icon(self) -> IconName {
-        match self {
-            Self::Head => IconName::Check,
-            Self::Branch => IconName::GitBranch,
-            Self::Tag => IconName::BookmarkOutlined,
-            Self::Stash => IconName::BoxOpen,
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -1950,13 +1928,6 @@ impl GitGraph {
         Some(SharedString::from(name.to_string()))
     }
 
-    fn ref_display_name(decoration: &SharedString) -> SharedString {
-        decoration
-            .strip_prefix("tag: ")
-            .map(SharedString::from)
-            .unwrap_or_else(|| decoration.clone())
-    }
-
     fn render_ref_chip(
         &self,
         name: SharedString,
@@ -1966,7 +1937,7 @@ impl GitGraph {
         background: gpui::Hsla,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let display_name = Self::ref_display_name(&name);
+        let tooltip_text = name.clone();
         let chip_id = SharedString::from(format!("git-graph-ref-chip-{commit_idx}-{name}"));
 
         div()
@@ -1975,9 +1946,9 @@ impl GitGraph {
             .min_w_0()
             .overflow_hidden()
             .child(
-                Chip::new(display_name.clone())
+                Chip::new(name.clone())
                     .label_size(LabelSize::Small)
-                    .icon(kind.icon())
+                    .icon(IconName::GitBranch)
                     .truncate()
                     .map(|chip| {
                         if matches!(kind, RefChipKind::Head) {
@@ -2005,7 +1976,7 @@ impl GitGraph {
                     }),
                 )
             })
-            .tooltip(move |_window, cx| Tooltip::simple(display_name.clone(), cx))
+            .tooltip(move |_window, cx| Tooltip::simple(tooltip_text.clone(), cx))
             .into_any_element()
     }
 
@@ -2018,7 +1989,7 @@ impl GitGraph {
     ) -> AnyElement {
         let hidden_refs_text = hidden_refs
             .iter()
-            .map(|ref_name| format!("- {}", Self::ref_display_name(ref_name)))
+            .map(|ref_name| format!("- {ref_name}"))
             .collect::<Vec<_>>()
             .join("\n");
         let chip_id = SharedString::from(format!("git-graph-ref-count-chip-{commit_idx}"));
@@ -2746,7 +2717,7 @@ impl GitGraph {
         let ref_entry = self.ref_menu_entry(commit.data.sha, &name, cx);
         let git_graph = cx.entity();
         let context_menu = ContextMenu::build(window, cx, move |menu, window, _| {
-            menu.header(format!("Ref {}", Self::ref_display_name(&name)))
+            menu.header(format!("Ref {name}"))
                 .map(|menu| ref_entry.add_entries(menu, &git_graph, window))
         });
 
@@ -2778,12 +2749,9 @@ impl GitGraph {
             menu = menu.header("Refs");
             for (ref_entry, name) in ref_entries {
                 let git_graph = git_graph.clone();
-                menu = menu.submenu(
-                    Self::ref_display_name(&name),
-                    move |submenu, window, _cx| {
-                        ref_entry.clone().add_entries(submenu, &git_graph, window)
-                    },
-                );
+                menu = menu.submenu(name, move |submenu, window, _cx| {
+                    ref_entry.clone().add_entries(submenu, &git_graph, window)
+                });
             }
             menu
         });
@@ -3314,12 +3282,15 @@ impl GitGraph {
                         .children((!ref_names.is_empty()).then(|| {
                             h_flex().gap_1().flex_wrap().justify_center().children(
                                 ref_names.iter().map(|name| {
-                                    let is_head =
-                                        Self::is_head_ref(name.as_ref(), &head_branch_name);
+                                    let kind = if Self::is_head_ref(name, &head_branch_name) {
+                                        RefChipKind::Head
+                                    } else {
+                                        RefChipKind::Regular
+                                    };
                                     self.render_ref_chip(
                                         name.clone(),
                                         accent_color,
-                                        RefChipKind::from_decoration(name, is_head),
+                                        kind,
                                         selected_idx,
                                         cx.theme().colors().editor_background,
                                         cx,
@@ -4039,10 +4010,7 @@ impl GitGraph {
                 {
                     (head_ref.clone(), RefChipKind::Head)
                 } else if let Some(first_ref) = ref_names.first() {
-                    (
-                        first_ref.clone(),
-                        RefChipKind::from_decoration(first_ref, false),
-                    )
+                    (first_ref.clone(), RefChipKind::Regular)
                 } else {
                     continue;
                 }
@@ -8608,18 +8576,6 @@ mod tests {
             resolved_task.resolved.args,
             vec!["checkout".to_string(), "feature-x".to_string()]
         );
-    }
-
-    #[test]
-    fn test_ref_display_name() {
-        for (decoration, expected) in [
-            ("tag: v1.0", "v1.0"),
-            ("HEAD -> main", "HEAD -> main"),
-            ("origin/main", "origin/main"),
-            ("stash@{0}", "stash@{0}"),
-        ] {
-            assert_eq!(GitGraph::ref_display_name(&decoration.into()), expected);
-        }
     }
 
     #[test]
