@@ -7218,6 +7218,11 @@ impl ProjectPanel {
         let reserves_chevron_slot =
             chevron.is_none() && folder_indicator.shows_chevron() && folder_indicator.shows_icon();
 
+        let git_status = if entry.is_dir() && entry.path.is_empty() {
+            GitSummary::UNCHANGED
+        } else {
+            git_status
+        };
         let filename_text_color =
             entry_git_aware_label_color(git_status, entry.is_ignored, is_marked);
 
