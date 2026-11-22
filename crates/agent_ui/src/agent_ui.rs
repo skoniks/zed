@@ -280,7 +280,7 @@ impl AgentThreadSource {
 }
 
 pub(crate) fn agent_sidebar_side(cx: &App) -> &'static str {
-    match AgentSettings::get_global(cx).sidebar_side() {
+    match AgentSettings::get_global(cx).threads_sidebar_side() {
         SidebarSide::Left => "left",
         SidebarSide::Right => "right",
     }

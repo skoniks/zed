@@ -2538,6 +2538,23 @@ fn run_tool_permissions_visual_tests(
 }
 
 #[cfg(target_os = "macos")]
+fn add_sidebar_test_agent_panels(
+    window_handle: WindowHandle<MultiWorkspace>,
+    cx: &mut VisualTestAppContext,
+) -> Result<()> {
+    window_handle.update(cx, |multi_workspace, window, cx| {
+        for workspace in multi_workspace.workspaces() {
+            workspace.update(cx, |workspace, cx| {
+                if workspace.panel::<agent_ui::AgentPanel>(cx).is_none() {
+                    let panel = cx.new(|cx| agent_ui::AgentPanel::test_new(workspace, window, cx));
+                    workspace.add_panel(panel, window, cx);
+                }
+            });
+        }
+    })
+}
+
+#[cfg(target_os = "macos")]
 fn run_multi_workspace_sidebar_visual_tests(
     app_state: Arc<AppState>,
     cx: &mut VisualTestAppContext,
@@ -2688,6 +2705,8 @@ fn run_multi_workspace_sidebar_visual_tests(
         .context("Failed to register sidebar")?;
 
     cx.run_until_parked();
+
+    add_sidebar_test_agent_panels(multi_workspace_window, cx)?;
 
     // Save test threads to the ThreadStore for each workspace
     let save_tasks = multi_workspace_window
@@ -3431,7 +3450,7 @@ fn open_sidebar_test_window(
         })
         .context("Failed to register sidebar")?;
 
-    cx.run_until_parked();
+    add_sidebar_test_agent_panels(multi_workspace_window, cx)?;
 
     // Open the sidebar
     multi_workspace_window

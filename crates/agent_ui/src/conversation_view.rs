@@ -3559,9 +3559,10 @@ impl ConversationView {
         };
 
         let multi_workspace = multi_workspace.read(cx);
-        multi_workspace.sidebar_open() && multi_workspace.is_threads_list_view_active(cx)
-            || multi_workspace.workspace() == &workspace
-                && self.is_visible_in_agent_panel(&workspace, cx)
+        if multi_workspace.sidebar_visible(cx) {
+            return multi_workspace.is_threads_list_view_active(cx);
+        }
+        multi_workspace.workspace() == &workspace && self.is_visible_in_agent_panel(&workspace, cx)
     }
 
     fn is_visible_in_agent_panel(&self, workspace: &Entity<Workspace>, cx: &Context<Self>) -> bool {
